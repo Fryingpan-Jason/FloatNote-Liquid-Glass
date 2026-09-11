@@ -265,7 +265,8 @@ void ExpandExperienceNote() {
     experienceAbsorbInputBlocked=true;experienceAbsorbReleased=0;
     experienceEndpointPresented=false;experienceMotionGeometryMismatches=0;experienceAbsorbProgress=1;experienceAbsorbAlpha=1;
     experienceIsland.SetInputSuppressed(true);
-    SaveExperienceRestoreSize();SaveSettings();
+    // Persist the final restore state at completion, not on the click path.
+    g_backdrop.SetPresentationMotion(true);
     // Establish the real start at the currently drawn (possibly hovered) dot.
     // Geometry is never enlarged after the curve computes its pixel bounds.
     SyncExperienceUI();
@@ -337,6 +338,7 @@ void MaybeAbsorbExperienceResize() {
         experienceNativeSizing=false;return;
     }
     experienceNativeSizing=false;experiencePanel.Close(false);KillTimer(g_window,kCaretTimer);
+    g_backdrop.SetPresentationMotion(true);
     // Take over this gesture before moving/hiding the grip. Its queued up or
     // capture-lost notifications may still arrive, but cannot restart resizing.
     g_pointerDown=false;g_pointerDragged=false;
@@ -372,7 +374,7 @@ void TickExperienceAbsorb() {
             // the dot/text. Never skip from the last larger rectangle to hidden.
             if(frame.progress>=1)experienceEndpointPresented=true;
         } else if(!restoring) {
-            ShowWindow(g_window,SW_HIDE);g_backdrop.Enable(g_window,false);
+            ShowWindow(g_window,SW_HIDE);g_backdrop.SuspendForFold();
             g_backdrop.SetPresentationOpacity(1.0f);
             experienceAbsorbing=false;experienceFolded=true;experienceAbsorbAlpha=1;
             // Keep saved/restore geometry at the original thin-card anchor, not
@@ -383,6 +385,7 @@ void TickExperienceAbsorb() {
             SaveSettings();SaveExperienceRestoreSize();
         } else {
             experienceRestoring=false;experienceAbsorbAlpha=1;
+            g_backdrop.SetPresentationMotion(false);
             g_backdrop.SetPresentationOpacity(1.0f);
             UpdateLayout(g_window);SaveSettings();SaveExperienceRestoreSize();SaveGlassLabPreferences();
         }
@@ -496,6 +499,9 @@ void CreateExperienceUI() {
 }
 void DestroyExperienceUI() {
     KillTimer(g_window,73);KillTimer(g_window,74);KillTimer(g_window,75);KillTimer(g_window,76);
+    // Restore persistence is deferred off the click path; closing mid-motion
+    // must still save the intended final state before controls are destroyed.
+    if(experienceReady)SaveExperienceRestoreSize();
     SaveExperienceMaterial();experienceReady=false;
     // The popup borrows the note's dispatcher queue; destroy it first.
     experiencePanel.Destroy();experienceIsland.Destroy();

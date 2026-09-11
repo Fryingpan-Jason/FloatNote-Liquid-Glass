@@ -65,7 +65,7 @@ int main() {
             // Reproduce a stationary pointer at the old hint while all actual
             // spring frames advance, settle, reverse and advance again.
             for (int frame = 0; frame < 240; ++frame) {
-                control.expansion_.Step(frame < 100 || frame >= 140 ? 1.0f : 0.0f, 1.0f / 60.0f);
+                control.expansion_.Step(frame < 100 || frame >= 140 ? 1.0f : 0.0f, 1.0f / 60.0f,32.0f,0.72f);
                 const auto current = control.Surface();
                 const RECT corridor = control.RevealArea();
                 Check(EqualRect(&expected, &corridor), "Hover target moved with animation");

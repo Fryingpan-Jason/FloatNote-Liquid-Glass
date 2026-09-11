@@ -23,8 +23,7 @@ namespace Detail {
 // elasticity without changing its anchored edge or its hit-test footprint.
 struct Spring {
     float value = 0, velocity = 0;
-    bool Step(float target, float seconds) {
-        constexpr float frequency = 22.0f, damping = 0.74f;
+    bool Step(float target, float seconds, float frequency=22.0f, float damping=0.74f) {
         const float dt = std::clamp(seconds, 0.0f, 1.0f);
         const float decayRate = frequency * damping;
         const float dampedFrequency = frequency * std::sqrt(1.0f - damping * damping);
@@ -690,7 +689,9 @@ private:
         const ULONGLONG now = GetTickCount64();
         const float seconds = static_cast<float>(now - lastMotionTick_) / 1000.0f;
         lastMotionTick_ = now;
-        bool active = expansion_.Step(expanded_ && ExpansionAllowed() ? 1.0f : 0.0f, seconds);
+        // A faster, more pronounced rise and a short elastic settle. Retain
+        // velocity when the pointer reverses instead of restarting an easing.
+        bool active = expansion_.Step(expanded_ && ExpansionAllowed() ? 1.0f : 0.0f, seconds, 32.0f, 0.72f);
         active |= foldedHover_.Step(folded_ && !noteTransition_ && !inputSuppressed_ && hover_ ? 1.0f : 0.0f, seconds);
         active |= Detail::Fade(settingsTint_, hover_ && !closeHover_ && !inputSuppressed_ && !noteTransition_ ? 1.0f : 0.0f, seconds);
         active |= Detail::Fade(closeTint_, closeHover_ && ExpansionAllowed() ? 1.0f : 0.0f, seconds);

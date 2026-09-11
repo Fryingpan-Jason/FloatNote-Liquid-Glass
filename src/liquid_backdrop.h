@@ -51,7 +51,8 @@ class GlassLabBackdrop {
     // Keep a halo for wide-angle lens/environment samples plus the blur kernel.
     static constexpr int padding = 512;
     bool enabled = false, haveDesktop = false, needRender = true;
-    bool frozen = false, failed = false;
+    bool frozen = false, failed = false, presentationMotion = false;
+    unsigned gpuInitializations=0, bufferResizes=0;
     ULONGLONG retryAt = 0;
     unsigned long long frames = 0, renders = 0, copies = 0;
     std::wstring adapterName;
@@ -363,6 +364,16 @@ float4 Glass(V i):SV_TARGET {
         context.Reset(); device.Reset(); width=height=0; monitor=nullptr; haveDesktop=false;
     }
     bool Check(HRESULT hr) { lastError=hr; return SUCCEEDED(hr); }
+    struct ShaderBytecode {
+        Ptr<ID3DBlob> vertex, blur, glass;
+        unsigned compilations=0;
+    };
+    static ShaderBytecode& CachedShaders() {
+        // All renderer operations run on the UI thread. Bytecode is independent
+        // of the D3D device and survives suspension, fallback and monitor changes.
+        static ShaderBytecode shaders;
+        return shaders;
+    }
     bool CaptureExclusion(bool value) {
         const DWORD desired=value ? WDA_EXCLUDEFROMCAPTURE : WDA_NONE;
         DWORD current=~0u;
@@ -372,6 +383,7 @@ float4 Glass(V i):SV_TARGET {
     }
     bool Initialize() {
         ReleaseGpu();
+        ++gpuInitializations;
         monitor=MonitorFromWindow(hwnd,MONITOR_DEFAULTTONEAREST);
         Ptr<IDXGIFactory1> factory;
         if (!Check(CreateDXGIFactory1(IID_PPV_ARGS(&factory)))) return false;
@@ -401,13 +413,11 @@ float4 Glass(V i):SV_TARGET {
         if(SUCCEEDED(device.As(&pacing))) pacing->SetMaximumFrameLatency(1);
         windowCapture.SetSignal(signal);
 
-        Ptr<ID3DBlob> vs,ps,gs,errors;
-        if(!Check(D3DCompile(shaderSource.data(),shaderSource.size(),nullptr,nullptr,nullptr,"VS","vs_4_0",D3DCOMPILE_OPTIMIZATION_LEVEL3,0,&vs,&errors))) return false;
-        if(!Check(D3DCompile(shaderSource.data(),shaderSource.size(),nullptr,nullptr,nullptr,"Blur","ps_4_0",D3DCOMPILE_OPTIMIZATION_LEVEL3,0,&ps,&errors))) return false;
-        if(!Check(D3DCompile(shaderSource.data(),shaderSource.size(),nullptr,nullptr,nullptr,"Glass","ps_4_0",D3DCOMPILE_OPTIMIZATION_LEVEL3,0,&gs,&errors))) return false;
-        if(!Check(device->CreateVertexShader(vs->GetBufferPointer(),vs->GetBufferSize(),nullptr,&vertex)) ||
-           !Check(device->CreatePixelShader(ps->GetBufferPointer(),ps->GetBufferSize(),nullptr,&blurShader)) ||
-           !Check(device->CreatePixelShader(gs->GetBufferPointer(),gs->GetBufferSize(),nullptr,&glassShader))) return false;
+        if(!Check(WarmShaderBytecode()))return false;
+        const auto& shaders=CachedShaders();
+        if(!Check(device->CreateVertexShader(shaders.vertex->GetBufferPointer(),shaders.vertex->GetBufferSize(),nullptr,&vertex)) ||
+           !Check(device->CreatePixelShader(shaders.blur->GetBufferPointer(),shaders.blur->GetBufferSize(),nullptr,&blurShader)) ||
+           !Check(device->CreatePixelShader(shaders.glass->GetBufferPointer(),shaders.glass->GetBufferSize(),nullptr,&glassShader))) return false;
         D3D11_BUFFER_DESC cb{}; cb.ByteWidth=sizeof(Constants); cb.Usage=D3D11_USAGE_DEFAULT; cb.BindFlags=D3D11_BIND_CONSTANT_BUFFER;
         if(!Check(device->CreateBuffer(&cb,nullptr,&constants))) return false;
         D3D11_SAMPLER_DESC sd{}; sd.Filter=D3D11_FILTER_MIN_MAG_MIP_LINEAR;
@@ -417,6 +427,7 @@ float4 Glass(V i):SV_TARGET {
     bool ResizeBuffers(int w,int h) {
         if(w==width && h==height && swap) return true;
         if(w<=0 || h<=0 || w>3000 || h>2200) { lastError=E_INVALIDARG; return false; }
+        ++bufferResizes;
         context->ClearState();
         if(swap) {
             if(!Check(swap->ResizeBuffers(2,w,h,DXGI_FORMAT_UNKNOWN,0))) return false;
@@ -433,6 +444,7 @@ float4 Glass(V i):SV_TARGET {
             Ptr<ABI::Windows::UI::Composition::ICompositorInterop> interop;
             if(!Check(system.compositor.As(&interop)) || !Check(interop->CreateCompositionSurfaceForSwapChain(swap.Get(),&surface))) return false;
             if(!Check(system.compositor->CreateSurfaceBrushWithSurface(surface.Get(),&surfaceBrush))) return false;
+            surfaceBrush->put_Stretch(ABI::Windows::UI::Composition::CompositionStretch_Fill);
         }
         patchView.Reset(); patch.Reset();
         D3D11_TEXTURE2D_DESC t{}; t.Width=w+padding*2; t.Height=h+padding*2;
@@ -539,6 +551,34 @@ float4 Glass(V i):SV_TARGET {
         const HRESULT failure=lastError;CaptureExclusion(false);lastError=failure;
     }
 public:
+    static HRESULT WarmShaderBytecode() {
+        auto& cached=CachedShaders();
+        if(cached.vertex && cached.blur && cached.glass)return S_OK;
+        Ptr<ID3DBlob> vs,ps,gs,errors;
+        HRESULT result=D3DCompile(shaderSource.data(),shaderSource.size(),nullptr,nullptr,nullptr,"VS","vs_4_0",D3DCOMPILE_OPTIMIZATION_LEVEL3,0,&vs,&errors);
+        if(FAILED(result))return result;
+        result=D3DCompile(shaderSource.data(),shaderSource.size(),nullptr,nullptr,nullptr,"Blur","ps_4_0",D3DCOMPILE_OPTIMIZATION_LEVEL3,0,&ps,&errors);
+        if(FAILED(result))return result;
+        result=D3DCompile(shaderSource.data(),shaderSource.size(),nullptr,nullptr,nullptr,"Glass","ps_4_0",D3DCOMPILE_OPTIMIZATION_LEVEL3,0,&gs,&errors);
+        if(FAILED(result))return result;
+        cached.vertex=vs;cached.blur=ps;cached.glass=gs;++cached.compilations;
+        return S_OK;
+    }
+    static unsigned ShaderCompilations() {return CachedShaders().compilations;}
+    void SetPresentationMotion(bool active) {
+        if(presentationMotion==active)return;
+        presentationMotion=active;
+        if(!active){needRender=true;RequestDraw();}
+    }
+    void SuspendForFold() {
+        // Retain the device, shaders and last rendered surface for immediate
+        // restore. Stop screen capture and wakeups while the note is hidden.
+        enabled=false;presentationMotion=false;
+        if(hwnd)KillTimer(hwnd,71);
+        windowEvents.Stop();windowCapture.Close();
+        if(system.visual)system.visual->put_IsVisible(FALSE);
+        CaptureExclusion(false);
+    }
     // Approximate the tiny background hidden by independently capturable
     // controls, before both blur and sharp/refraction sampling. This preserves
     // WDA_NONE on the controls; it cannot recover exact covered desktop detail.
@@ -585,7 +625,7 @@ public:
     // Transient window presentation only; optical parameters and pixels remain unchanged.
     void SetPresentationOpacity(float value) { if(system.visual)system.visual->put_Opacity(std::clamp(value,0.0f,1.0f)); }
     void Resize(int w,int h) { system.Resize(w,h); needRender=true; RequestDraw(); }
-    void RequestDraw() {if(signal && enabled && mode>0) signal->Notify();}
+    void RequestDraw() {if(signal && enabled && mode>0 && !presentationMotion) signal->Notify();}
     void FrameReady() {
         if(!signal) return;
         const double notified=signal->notifiedAt.load(); signal->posted.store(false);
@@ -619,6 +659,7 @@ public:
             +L"\r\nbaseThicknessDip="+std::to_wstring(baseThickness)+L"\r\nreliefHeightDip="+std::to_wstring(reliefHeight)
             +L"\r\nreflection="+std::to_wstring(reflection)+L"\r\nopticalOnly="+std::to_wstring(opticalOnly)
             +L"\r\nfinishVersion=1\r\nedgeRoughness="+std::to_wstring(edgeRoughness)+L"\r\nenvironmentTint="+std::to_wstring(environmentTint)
+            +L"\r\nshaderCompilations="+std::to_wstring(ShaderCompilations())+L"\r\ngpuInitializations="+std::to_wstring(gpuInitializations)+L"\r\nbufferResizes="+std::to_wstring(bufferResizes)
             +L"\r\nedgeAA=coverage-radiance-4x4\r\nclipGuardPx=2"
             +L"\r\nlensMapping=profile-comparison-v1\r\ncentralMagnification=1.0"
             +L"\r\ndispersion="+std::to_wstring(dispersion)
@@ -627,7 +668,7 @@ public:
             +L"\r\nsubmitP95Ms="+std::to_wstring(P95(submitTimes,submitCount))+L"\r\ndrainedFrames="+std::to_wstring(windowCapture.drained)+L"\r\n"+windowCapture.Detail();
     }
     void Tick() {
-        if(!enabled || mode<=0 || !IsWindowVisible(hwnd) || IsIconic(hwnd)) return;
+        if(!enabled || presentationMotion || mode<=0 || !IsWindowVisible(hwnd) || IsIconic(hwnd)) return;
         // The existing idle tick also clears stale masks when the desktop has
         // stopped producing capture frames; no additional timer is introduced.
         if(previousControlOccludersUntil && GetTickCount64()>=previousControlOccludersUntil) {
