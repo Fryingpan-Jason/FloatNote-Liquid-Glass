@@ -4,6 +4,7 @@
 #include "glass_close_behavior.h"
 #include "glass_experience_policy.h"
 #include "glass_absorb_motion.h"
+#include "../src/glass_window_stacking.h"
 #include <functional>
 
 namespace {
@@ -90,16 +91,9 @@ void SyncExperienceUI() {
     // Insert the controls immediately above the note, preserving applications
     // already above it rather than raising the controls to the top of the band.
     if(IsWindowVisible(g_window) && IsWindowVisible(experienceIsland.Window())) {
-        int remaining=64;
-        for(HWND above=GetWindow(experienceIsland.Window(),GW_HWNDPREV);above && --remaining;
-            above=GetWindow(above,GW_HWNDPREV))if(above==g_window) {
-                HWND insert=GetWindow(g_window,GW_HWNDPREV);
-                if(!insert || (!state.pinned && (GetWindowLongPtrW(insert,GWL_EXSTYLE)&WS_EX_TOPMOST)))insert=HWND_TOP;
-                SetWindowPos(experienceIsland.Window(),insert,0,0,0,0,SWP_NOMOVE|SWP_NOSIZE|SWP_NOACTIVATE);
-                if(IsWindowVisible(experienceIsland.CloseWindow()))SetWindowPos(experienceIsland.CloseWindow(),insert,
-                    0,0,0,0,SWP_NOMOVE|SWP_NOSIZE|SWP_NOACTIVATE);
-                break;
-            }
+        GlassWindowStacking::PlaceAbove(experienceIsland.Window(),g_window,state.pinned);
+        if(IsWindowVisible(experienceIsland.CloseWindow()))
+            GlassWindowStacking::PlaceAbove(experienceIsland.CloseWindow(),experienceIsland.Window(),state.pinned);
     }
     SyncExperienceCapture();
     experiencePanel.UpdateState(state);
