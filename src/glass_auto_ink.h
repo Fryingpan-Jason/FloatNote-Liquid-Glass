@@ -43,4 +43,23 @@ struct Decision {
         if(now-candidateAt>=90){white=next;pending=false;}
     }
 };
+struct Fade {
+    static constexpr double duration=180;
+    COLORREF from=Dark,target=Dark;
+    double started=0;
+    bool initialized=false;
+    void Reset(COLORREF colour){from=target=colour;initialized=true;started=0;}
+    bool Running(double now) const {return from!=target && now-started<duration;}
+    COLORREF Sample(double now) const {
+        double t=std::clamp((now-started)/duration,0.,1.);
+        t=t*t*(3-2*t); // smooth departure and arrival, no long grey plateau
+        auto channel=[t](int a,int b){return int(std::lround(a+(b-a)*t));};
+        return RGB(channel(GetRValue(from),GetRValue(target)),channel(GetGValue(from),GetGValue(target)),channel(GetBValue(from),GetBValue(target)));
+    }
+    void Aim(COLORREF colour,COLORREF current,double now) {
+        if(!initialized)Reset(current);
+        if(colour==target)return;
+        from=Sample(now);target=colour;started=now;
+    }
+};
 }

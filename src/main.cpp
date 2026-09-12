@@ -592,18 +592,34 @@ void RequestRender() {
 #ifdef FLOATNOTE_GLASS_LAB
 void SyncAdaptiveInk() {
     static bool timer=false;
+    static bool fadeTimer=false;
+    static GlassAutoInk::Fade fade;
+    static double lastInkPaint=0;
     const bool motion=ExperienceAbsorbing();
     const bool active=g_window && g_settings.autoTextColor && !g_highContrast && g_nativeGlass && g_glassActive &&
         g_backdrop.mode==2 && EffectiveOpacityPercent()<100 && g_isVisible && !IsIconic(g_window) && !ExperienceCompact();
     if(active && !motion && !timer){SetTimer(g_window,82,100,nullptr);timer=true;}
     else if((!active || motion) && timer){KillTimer(g_window,82);timer=false;}
-    if(motion)return; // Freeze the chosen ink through the cached-surface animation.
+    if(motion) {
+        if(fadeTimer){KillTimer(g_window,83);fadeTimer=false;}
+        fade.Reset(kNoteText);return; // Freeze ink through the cached-surface animation.
+    }
     const int alpha=std::max(g_settings.passThrough?0:1,MulDiv(EffectiveOpacityPercent(),255,100));
     const int choice=g_backdrop.UpdateAutoInk(active,kBackground,alpha,kText==GlassAutoInk::Light);
     const COLORREF next=g_highContrast?kText:!g_settings.autoTextColor?g_settings.textColor:
         choice<0?kText:choice?GlassAutoInk::Light:GlassAutoInk::Dark;
-    if(next!=kNoteText) {
-        kNoteText=next;
+    const double now=GlassClockMs();
+    if(active && choice>=0)fade.Aim(next,kNoteText,now);
+    else fade.Reset(next); // Explicit colours and accessibility changes apply immediately.
+    const bool animating=active && fade.Running(now);
+    if(animating && !fadeTimer){SetTimer(g_window,83,16,nullptr);fadeTimer=true;}
+    else if(!animating && fadeTimer){KillTimer(g_window,83);fadeTimer=false;}
+    // Capture and render-completion events also enter here. Cap fade updates
+    // so they cannot turn a short animation into a self-posting repaint loop.
+    const COLORREF presented=animating && now-lastInkPaint<16?kNoteText:fade.Sample(now);
+    if(presented!=kNoteText) {
+        lastInkPaint=now;
+        kNoteText=presented;
         if(g_edit)InvalidateRect(g_edit,nullptr,FALSE);
         RequestRender();
     }
@@ -2434,6 +2450,7 @@ LRESULT CALLBACK WindowProcedure(HWND window, UINT message, WPARAM wParam, LPARA
     if (message == WM_TIMER && wParam == 71) { g_backdrop.Tick(); SyncAdaptiveInk(); return 0; }
     if (message == kGlassFrameReady) { g_backdrop.FrameReady(); SyncAdaptiveInk(); ApplyWindowStacking(); return 0; }
     if (message == WM_TIMER && wParam == 82) { SyncAdaptiveInk(); return 0; }
+    if (message == WM_TIMER && wParam == 83) { SyncAdaptiveInk(); return 0; }
     if (message == WM_WINDOWPOSCHANGED) {g_backdrop.RequestDraw();SyncExperienceUI();}
     if (message == WM_ACTIVATE && LOWORD(wParam)!=WA_INACTIVE)SyncExperienceUI();
     if (message == WM_TIMER && wParam==73){ApplyWindowStacking();SyncExperienceUI();return 0;}
