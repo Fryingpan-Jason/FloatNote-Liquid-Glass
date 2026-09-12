@@ -1196,7 +1196,7 @@ void DrawControl(HWND parent, const DRAWITEMSTRUCT* item) {
         return;
     }
     if (item->CtlID == kControlGrip) {
-        HPEN pen = CreatePen(PS_SOLID, std::max(1, ScaleForDpi(parent, 1)), BlendColor(kBackground, kText, 40));
+        HPEN pen = CreatePen(PS_SOLID, std::max(1, ScaleForDpi(parent, 1)), BlendColor(kBackground, kNoteText, 40));
         SelectObject(item->hDC, pen);
         for (int offset : {5, 9}) {
             MoveToEx(item->hDC, rect.right - ScaleForDpi(parent, offset + 3), rect.bottom - ScaleForDpi(parent, 4),
@@ -2269,7 +2269,7 @@ void DrawCompositedDecorations(RECT outer) {
                       static_cast<float>(grip.bottom - ScaleForDpi(g_window, 4)),
                       static_cast<float>(grip.right - ScaleForDpi(g_window, 4)),
                       static_cast<float>(grip.bottom - ScaleForDpi(g_window, offset + 3)),
-                      static_cast<float>(ScaleForDpi(g_window, 1)), kText, g_highContrast ? 255 : 110);
+                      static_cast<float>(ScaleForDpi(g_window, 1)), kNoteText, g_highContrast ? 255 : 110);
     }
     if (IsWindowVisible(g_pill) && GetFocus() == g_pill) {
         RECT focus = pill;
