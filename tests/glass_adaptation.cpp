@@ -18,9 +18,9 @@ struct GlassAdaptationTest {
     Microsoft::WRL::ComPtr<ID3D11RenderTargetView> target;
     static void Check(HRESULT hr) {if(FAILED(hr))throw std::runtime_error("D3D operation failed");}
     ~GlassAdaptationTest(){g.Close();}
-    GlassAdaptationTest() {
+    GlassAdaptationTest(bool hardware=false) {
         Check(GlassLabBackdrop::WarmShaderBytecode());
-        Check(D3D11CreateDevice(nullptr,D3D_DRIVER_TYPE_WARP,nullptr,0,nullptr,0,D3D11_SDK_VERSION,&g.device,nullptr,&g.context));
+        Check(D3D11CreateDevice(nullptr,hardware?D3D_DRIVER_TYPE_HARDWARE:D3D_DRIVER_TYPE_WARP,nullptr,0,nullptr,0,D3D11_SDK_VERSION,&g.device,nullptr,&g.context));
         auto& s=g.CachedShaders();
         Check(g.device->CreateVertexShader(s.vertex->GetBufferPointer(),s.vertex->GetBufferSize(),nullptr,&g.vertex));
         Check(g.device->CreatePixelShader(s.glass->GetBufferPointer(),s.glass->GetBufferSize(),nullptr,&g.glassShader));
@@ -131,4 +131,6 @@ struct GlassAdaptationTest {
         std::printf("Actual HLSL: white/black centre preserved; white shoulder %.3f; flat variance %.5f vs detail %.5f; temporal response and disable pass. Field %dx%d.\n",white[4*W+W/2][0],flatVariance/flat.size(),busyVariance/busy.size(),g.adaptationWidth,g.adaptationHeight);
     }
 };
+#ifndef FLOATNOTE_ADAPTATION_FIXTURE
 int main(){try{GlassAdaptationTest test;test.Run();return 0;}catch(const std::exception& e){std::fprintf(stderr,"%s\n",e.what());return 1;}}
+#endif

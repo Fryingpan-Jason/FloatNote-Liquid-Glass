@@ -589,11 +589,35 @@ void RequestRender() {
     g_renderPosted = PostMessageW(g_window, kRenderMessage, 0, 0) != FALSE;
 }
 
+#ifdef FLOATNOTE_GLASS_LAB
+void SyncAdaptiveInk() {
+    static bool timer=false;
+    const bool motion=ExperienceAbsorbing();
+    const bool active=g_window && g_settings.autoTextColor && !g_highContrast && g_nativeGlass && g_glassActive &&
+        g_backdrop.mode==2 && EffectiveOpacityPercent()<100 && g_isVisible && !IsIconic(g_window) && !ExperienceCompact();
+    if(active && !motion && !timer){SetTimer(g_window,82,100,nullptr);timer=true;}
+    else if((!active || motion) && timer){KillTimer(g_window,82);timer=false;}
+    if(motion)return; // Freeze the chosen ink through the cached-surface animation.
+    const int alpha=std::max(g_settings.passThrough?0:1,MulDiv(EffectiveOpacityPercent(),255,100));
+    const int choice=g_backdrop.UpdateAutoInk(active,kBackground,alpha,kText==GlassAutoInk::Light);
+    const COLORREF next=g_highContrast?kText:!g_settings.autoTextColor?g_settings.textColor:
+        choice<0?kText:choice?GlassAutoInk::Light:GlassAutoInk::Dark;
+    if(next!=kNoteText) {
+        kNoteText=next;
+        if(g_edit)InvalidateRect(g_edit,nullptr,FALSE);
+        RequestRender();
+    }
+}
+#endif
+
 void RefreshTheme() {
     g_highContrast = SystemHighContrast();
     kBackground = g_highContrast ? GetSysColor(COLOR_WINDOW) : g_settings.themeColor;
     kText = g_highContrast ? GetSysColor(COLOR_WINDOWTEXT) : ContrastText(kBackground);
     kNoteText = g_highContrast || g_settings.autoTextColor ? kText : g_settings.textColor;
+#ifdef FLOATNOTE_GLASS_LAB
+    SyncAdaptiveInk();
+#endif
     HBRUSH oldBrush = g_editBrush;
     g_editBrush = CreateSolidBrush(kBackground);
     if (oldBrush)
@@ -2317,6 +2341,10 @@ void RenderLayeredWindow() {
         g_highContrast ? 255 : std::max(g_settings.passThrough ? 0 : 1, MulDiv(EffectiveOpacityPercent(), 255, 100));
     const DWORD background = (GetRValue(kBackground) << 16) | (GetGValue(kBackground) << 8) | GetBValue(kBackground);
     const int radius = std::min({ScaleForDpi(g_window, NoteCornerRadius()), width / 2, height / 2});
+#ifdef FLOATNOTE_GLASS_LAB
+    RECT inkBounds{width,height,0,0};
+    const bool collectInk=g_settings.autoTextColor && !g_highContrast && g_backdrop.mode==2 && EffectiveOpacityPercent()<100;
+#endif
     for (int y = 0; y < height; ++y) {
         for (int x = 0; x < width; ++x) {
             DWORD& pixel = surface.pixels[y * width + x];
@@ -2331,6 +2359,12 @@ void RenderLayeredWindow() {
                     pixel = PremultiplyPixel(color, 255);
                 } else {
                     const int coverage = static_cast<int>(black & 255);
+#ifdef FLOATNOTE_GLASS_LAB
+                    if(collectInk && coverage>32) {
+                        inkBounds.left=std::min(inkBounds.left,LONG(x));inkBounds.top=std::min(inkBounds.top,LONG(y));
+                        inkBounds.right=std::max(inkBounds.right,LONG(x+1));inkBounds.bottom=std::max(inkBounds.bottom,LONG(y+1));
+                    }
+#endif
                     const int residual = MulDiv(255 - coverage, opacity, 255);
                     const int alpha = coverage + residual;
                     const int red = (GetRValue(kNoteText) * coverage + GetRValue(kBackground) * residual) / 255;
@@ -2383,12 +2417,23 @@ void RenderLayeredWindow() {
                             ULW_ALPHA);
     }
     g_rendering = false;
+#ifdef FLOATNOTE_GLASS_LAB
+    if(collectInk && inkBounds.right>inkBounds.left && inkBounds.bottom>inkBounds.top) {
+        const int margin=ScaleForDpi(g_window,3);InflateRect(&inkBounds,margin,margin);
+        IntersectRect(&inkBounds,&inkBounds,&editor);
+        g_backdrop.SetInkRegion(inkBounds);
+    } else if(collectInk && GetWindowTextLengthW(g_edit)==0)g_backdrop.SetInkRegion(editor);
+    // A fully selected native EDIT has opaque selection pixels, not a glyph
+    // mask. Retain the last text region so selection cannot change the vote.
+    SyncAdaptiveInk();
+#endif
 }
 
 LRESULT CALLBACK WindowProcedure(HWND window, UINT message, WPARAM wParam, LPARAM lParam) {
 #ifdef FLOATNOTE_GLASS_LAB
-    if (message == WM_TIMER && wParam == 71) { g_backdrop.Tick(); return 0; }
-    if (message == kGlassFrameReady) { g_backdrop.FrameReady(); ApplyWindowStacking(); return 0; }
+    if (message == WM_TIMER && wParam == 71) { g_backdrop.Tick(); SyncAdaptiveInk(); return 0; }
+    if (message == kGlassFrameReady) { g_backdrop.FrameReady(); SyncAdaptiveInk(); ApplyWindowStacking(); return 0; }
+    if (message == WM_TIMER && wParam == 82) { SyncAdaptiveInk(); return 0; }
     if (message == WM_WINDOWPOSCHANGED) {g_backdrop.RequestDraw();SyncExperienceUI();}
     if (message == WM_ACTIVATE && LOWORD(wParam)!=WA_INACTIVE)SyncExperienceUI();
     if (message == WM_TIMER && wParam==73){ApplyWindowStacking();SyncExperienceUI();return 0;}

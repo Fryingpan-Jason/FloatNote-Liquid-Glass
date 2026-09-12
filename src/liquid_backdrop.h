@@ -9,6 +9,7 @@
 #include "glass_lens.h"
 #include "glass_bevel.h"
 #include "glass_surface.h"
+#include "glass_auto_ink.h"
 #include <array>
 #include <cmath>
 #include <sstream>
@@ -20,6 +21,7 @@
 // The original Windows backdrop owns the visual and remains the failure fallback.
 class GlassLabBackdrop {
     friend struct GlassAdaptationTest;
+    friend struct GlassAutoInkTest;
     template<class T> using Ptr = Microsoft::WRL::ComPtr<T>;
     NativeBackdrop system;
     Ptr<ABI::Windows::UI::Composition::ICompositionBrush> originalBrush;
@@ -44,6 +46,19 @@ class GlassLabBackdrop {
     int adaptationWidth=0,adaptationHeight=0,adaptationIndex=0;
     double adaptationAt=0,adaptationUntil=0;
     Ptr<ID3D11VertexShader> vertex;
+    Ptr<ID3D11VertexShader> inkVertex;
+    Ptr<ID3D11Texture2D> inkTarget,inkReadback;
+    Ptr<ID3D11RenderTargetView> inkTargetView;
+    GlassAutoInk::Decision inkDecision;
+    RECT inkRegion{};
+    bool inkEnabled=false,inkPending=false,inkDirty=false,inkFrameValid=false,inkUnavailable=false;
+    unsigned inkGeneration=0,inkPendingGeneration=0;
+    COLORREF inkTint=0;
+    int inkAlpha=0;
+    double inkSubmittedAt=0;
+    double inkLastShare=.5;
+    unsigned inkSubmissions=0,inkPollMisses=0;
+    static constexpr int inkWidth=32,inkHeight=16;
     Ptr<ID3D11PixelShader> blurShader, glassShader, adaptationShader;
     Ptr<ID3D11Buffer> constants;
     Ptr<ID3D11SamplerState> sampler;
@@ -90,7 +105,7 @@ class GlassLabBackdrop {
             });
         } catch(...) {signal->borderAccess.store(-2);}
     }
-    struct alignas(16) Constants {
+    struct Constants {
         float dimensions[4]; // patch width/height, window width/height
         float material[4]; // sigma, edge bend, corner radius, glass mode
         float direction[4]; // blur x/y, padding, sharp mixture
@@ -101,12 +116,16 @@ class GlassLabBackdrop {
         float field[4]; // old Poisson field grid and cell spacing
         float finish[4]; // roughness, environment colour, adaptation blend, history valid
         float controlMasks[4][4]; // current/previous visible control bounds in patch pixels
+        float inkProbe[4]; // normalized text region, used only by the tiny ink probe
     };
+    static_assert(sizeof(Constants)%16==0);
+    Constants inkFrame{};
     inline static const std::string shaderSource = std::string(GlassLens::Shader) + GlassBevel::Shader + R"HLSL(
 cbuffer Params : register(b0) {
     float4 dims; float4 material; float4 direction; float4 bounds; float4 optics;
     float4 response; float4 surface; float4 field; float4 finish;
     float4 controlMasks[4];
+    float4 inkProbe;
 };
 Texture2D source0 : register(t0);
 Texture2D source1 : register(t1);
@@ -181,6 +200,9 @@ float4 Blur(V i):SV_TARGET {
         total+=2*w;
     }
     return c/total;
+}
+V VSInk(uint id:SV_VertexID) {
+    V o=VS(id);o.uv=inkProbe.xy+o.uv*inkProbe.zw;return o;
 }
 float4 Adapt(V i):SV_TARGET {
     // Store local colour and spatial luminance variance. Detail is measured
@@ -413,12 +435,14 @@ float4 Glass(V i):SV_TARGET {
         for (int i=0;i<2;i++) { blurredTargets[i].Reset(); blurredViews[i].Reset(); blurred[i].Reset(); }
         for(int i=0;i<2;i++) {adaptationTargets[i].Reset();adaptationViews[i].Reset();adaptation[i].Reset();}
         adaptationWidth=adaptationHeight=0;adaptationAt=adaptationUntil=0;
+        inkTargetView.Reset();inkTarget.Reset();inkReadback.Reset();inkVertex.Reset();
+        inkPending=inkFrameValid=inkUnavailable=false;inkDecision.Reset();
         vertex.Reset(); blurShader.Reset(); glassShader.Reset(); adaptationShader.Reset(); constants.Reset(); sampler.Reset();
         context.Reset(); device.Reset(); width=height=0; monitor=nullptr; haveDesktop=false;
     }
     bool Check(HRESULT hr) { lastError=hr; return SUCCEEDED(hr); }
     struct ShaderBytecode {
-        Ptr<ID3DBlob> vertex, blur, glass, adapt;
+        Ptr<ID3DBlob> vertex, blur, glass, adapt, ink;
         unsigned compilations=0;
     };
     static ShaderBytecode& CachedShaders() {
@@ -469,6 +493,7 @@ float4 Glass(V i):SV_TARGET {
         if(!Check(WarmShaderBytecode()))return false;
         const auto& shaders=CachedShaders();
         if(!Check(device->CreateVertexShader(shaders.vertex->GetBufferPointer(),shaders.vertex->GetBufferSize(),nullptr,&vertex)) ||
+           !Check(device->CreateVertexShader(shaders.ink->GetBufferPointer(),shaders.ink->GetBufferSize(),nullptr,&inkVertex)) ||
            !Check(device->CreatePixelShader(shaders.blur->GetBufferPointer(),shaders.blur->GetBufferSize(),nullptr,&blurShader)) ||
            !Check(device->CreatePixelShader(shaders.adapt->GetBufferPointer(),shaders.adapt->GetBufferSize(),nullptr,&adaptationShader)) ||
            !Check(device->CreatePixelShader(shaders.glass->GetBufferPointer(),shaders.glass->GetBufferSize(),nullptr,&glassShader))) return false;
@@ -482,6 +507,7 @@ float4 Glass(V i):SV_TARGET {
         if(w==width && h==height && swap) return true;
         if(w<=0 || h<=0 || w>3000 || h>2200) { lastError=E_INVALIDARG; return false; }
         ++bufferResizes;
+        inkFrameValid=false;++inkGeneration;
         context->ClearState();
         if(swap) {
             if(!Check(swap->ResizeBuffers(2,w,h,DXGI_FORMAT_UNKNOWN,0))) return false;
@@ -633,6 +659,7 @@ float4 Glass(V i):SV_TARGET {
         Ptr<ABI::Windows::UI::Composition::ISpriteVisual> sprite; system.visual.As(&sprite);
         Ptr<ABI::Windows::UI::Composition::ICompositionBrush> brush; surfaceBrush.As(&brush);
         sprite->put_Brush(brush.Get());
+        inkFrame=c;inkFrameValid=true;inkDirty=true;
         ++renders; needRender=adapt && now<adaptationUntil; lastRect=rect; return true;
     }
     void Fail() {
@@ -641,10 +668,72 @@ float4 Glass(V i):SV_TARGET {
         const HRESULT failure=lastError;CaptureExclusion(false);lastError=failure;
     }
 public:
+    void SetInkRegion(const RECT& region) {
+        if(EqualRect(&region,&inkRegion))return;
+        inkRegion=region;inkDirty=true;++inkGeneration;
+    }
+    // Returns -1 for the existing theme-based Auto fallback, 0 dark, 1 light.
+    // Only the 2 KB probe can cross to the CPU, using nonblocking Map. Busy
+    // readbacks are skipped, never waited on. Native text/IME rendering stays intact.
+    int UpdateAutoInk(bool requested,COLORREF tint,int alpha,bool fallbackWhite) {
+        if(requested!=inkEnabled || tint!=inkTint || alpha!=inkAlpha) {
+            inkEnabled=requested;inkTint=tint;inkAlpha=alpha;++inkGeneration;
+            inkDirty=true;inkDecision.Reset(fallbackWhite);
+        }
+        if(!inkEnabled || mode!=2 || !enabled || failed || inkUnavailable || !haveDesktop || !inkFrameValid)return -1;
+        if(presentationMotion)return inkDecision.valid?int(inkDecision.white):-1;
+        const double now=GlassClockMs();
+        if(inkPending) {
+            D3D11_MAPPED_SUBRESOURCE mapped{};
+            const HRESULT hr=context->Map(inkReadback.Get(),0,D3D11_MAP_READ,D3D11_MAP_FLAG_DO_NOT_WAIT,&mapped);
+            if(SUCCEEDED(hr)) {
+                if(inkPendingGeneration==inkGeneration && now-inkSubmittedAt<500) {
+                    inkLastShare=GlassAutoInk::WhiteShare(mapped.pData,mapped.RowPitch,inkWidth,inkHeight,inkTint,inkAlpha);
+                    inkDecision.Update(inkLastShare,now);
+                }
+                context->Unmap(inkReadback.Get(),0);inkPending=false;
+            } else if(hr==DXGI_ERROR_WAS_STILL_DRAWING)++inkPollMisses;
+            else {inkUnavailable=true;return -1;}
+        }
+        if(inkDecision.valid)inkDecision.Update(inkLastShare,now);
+        if(!inkPending && inkDirty && now-inkSubmittedAt>=100) {
+            if(!inkTarget) {
+                D3D11_TEXTURE2D_DESC t{};t.Width=inkWidth;t.Height=inkHeight;t.ArraySize=t.MipLevels=1;
+                t.Format=DXGI_FORMAT_B8G8R8A8_UNORM;t.SampleDesc.Count=1;t.Usage=D3D11_USAGE_DEFAULT;t.BindFlags=D3D11_BIND_RENDER_TARGET;
+                if(FAILED(device->CreateTexture2D(&t,nullptr,&inkTarget)) || FAILED(device->CreateRenderTargetView(inkTarget.Get(),nullptr,&inkTargetView))) {
+                    inkUnavailable=true;return -1;
+                }
+                t.Usage=D3D11_USAGE_STAGING;t.BindFlags=0;t.CPUAccessFlags=D3D11_CPU_ACCESS_READ;
+                if(FAILED(device->CreateTexture2D(&t,nullptr,&inkReadback))){inkUnavailable=true;return -1;}
+            }
+            RECT region{std::clamp(inkRegion.left,0L,LONG(width-1)),std::clamp(inkRegion.top,0L,LONG(height-1)),
+                        std::clamp(inkRegion.right,1L,LONG(width)),std::clamp(inkRegion.bottom,1L,LONG(height))};
+            if(region.right<=region.left || region.bottom<=region.top)return -1;
+            Constants c=inkFrame;
+            c.inkProbe[0]=float(region.left)/width;c.inkProbe[1]=float(region.top)/height;
+            c.inkProbe[2]=float(region.right-region.left)/width;c.inkProbe[3]=float(region.bottom-region.top)/height;
+            context->UpdateSubresource(constants.Get(),0,nullptr,&c,0,0);
+            context->IASetInputLayout(nullptr);context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+            context->VSSetShader(inkVertex.Get(),nullptr,0);context->VSSetConstantBuffers(0,1,constants.GetAddressOf());
+            context->PSSetShader(glassShader.Get(),nullptr,0);context->PSSetConstantBuffers(0,1,constants.GetAddressOf());
+            context->PSSetSamplers(0,1,sampler.GetAddressOf());
+            D3D11_VIEWPORT v{0,0,float(inkWidth),float(inkHeight),0,1};context->RSSetViewports(1,&v);
+            context->OMSetRenderTargets(1,inkTargetView.GetAddressOf(),nullptr);
+            ID3D11ShaderResourceView* inputs[]={blurredViews[1].Get(),patchView.Get(),oldHeightView.Get(),adaptiveContrast&&!opticalOnly?adaptationViews[adaptationIndex].Get():nullptr};
+            context->PSSetShaderResources(0,4,inputs);context->Draw(3,0);
+            context->OMSetRenderTargets(0,nullptr,nullptr);ID3D11ShaderResourceView* empty[4]={};context->PSSetShaderResources(0,4,empty);
+            context->CopyResource(inkReadback.Get(),inkTarget.Get());
+            // Submit without waiting, including when the captured desktop is
+            // static and no further swap-chain Present would submit this copy.
+            context->Flush();
+            inkPending=true;inkDirty=false;inkSubmittedAt=now;inkPendingGeneration=inkGeneration;++inkSubmissions;
+        }
+        return inkDecision.valid?int(inkDecision.white):-1;
+    }
     static HRESULT WarmShaderBytecode() {
         auto& cached=CachedShaders();
-        if(cached.vertex && cached.blur && cached.glass && cached.adapt)return S_OK;
-        Ptr<ID3DBlob> vs,ps,gs,ads,errors;
+        if(cached.vertex && cached.blur && cached.glass && cached.adapt && cached.ink)return S_OK;
+        Ptr<ID3DBlob> vs,ps,gs,ads,ivs,errors;
         HRESULT result=D3DCompile(shaderSource.data(),shaderSource.size(),nullptr,nullptr,nullptr,"VS","vs_4_0",D3DCOMPILE_OPTIMIZATION_LEVEL3,0,&vs,&errors);
         if(FAILED(result))return result;
         result=D3DCompile(shaderSource.data(),shaderSource.size(),nullptr,nullptr,nullptr,"Blur","ps_4_0",D3DCOMPILE_OPTIMIZATION_LEVEL3,0,&ps,&errors);
@@ -653,7 +742,9 @@ public:
         if(FAILED(result))return result;
         result=D3DCompile(shaderSource.data(),shaderSource.size(),nullptr,nullptr,nullptr,"Adapt","ps_4_0",D3DCOMPILE_OPTIMIZATION_LEVEL3,0,&ads,&errors);
         if(FAILED(result))return result;
-        cached.vertex=vs;cached.blur=ps;cached.glass=gs;cached.adapt=ads;++cached.compilations;
+        result=D3DCompile(shaderSource.data(),shaderSource.size(),nullptr,nullptr,nullptr,"VSInk","vs_4_0",D3DCOMPILE_OPTIMIZATION_LEVEL3,0,&ivs,&errors);
+        if(FAILED(result))return result;
+        cached.vertex=vs;cached.blur=ps;cached.glass=gs;cached.adapt=ads;cached.ink=ivs;++cached.compilations;
         return S_OK;
     }
     static unsigned ShaderCompilations() {return CachedShaders().compilations;}
@@ -666,6 +757,7 @@ public:
         // Retain the device, shaders and last rendered surface for immediate
         // restore. Stop screen capture and wakeups while the note is hidden.
         enabled=false;presentationMotion=false;
+        inkFrameValid=false;inkDecision.Reset();++inkGeneration;
         adaptationAt=0;
         if(hwnd)KillTimer(hwnd,71);
         windowEvents.Stop();windowCapture.Close();
@@ -726,6 +818,7 @@ public:
         Tick();
     }
     void Changed() {
+        inkFrameValid=false;inkDecision.Reset();++inkGeneration;
         adaptationAt=0;
         needRender=true; failed=false; retryAt=0;
         if(mode<=0) { ReleaseGpu(); KillTimer(hwnd,71); windowEvents.Stop(); CaptureExclusion(false); }
@@ -759,6 +852,7 @@ public:
             +L"\r\ndispersion="+std::to_wstring(dispersion)
             +L"\r\nadaptiveContrast="+std::to_wstring(adaptiveContrast)
             +L"\r\nadaptation=local-colour-variance-v1\r\nadaptationGrid="+std::to_wstring(adaptationWidth)+L"x"+std::to_wstring(adaptationHeight)
+            +L"\r\nautoInkProbe=32x16-10Hz\r\nautoInkSubmissions="+std::to_wstring(inkSubmissions)+L"\r\nautoInkBusySkips="+std::to_wstring(inkPollMisses)
             +L"\r\nsourceAgeP95Ms="+(ageCount ? std::to_wstring(P95(sourceAges,ageCount)) : L"unavailable")+L"\r\neventDelayP95Ms="+std::to_wstring(P95(eventDelays,eventCount))
             +L"\r\nsubmitP95Ms="+std::to_wstring(P95(submitTimes,submitCount))+L"\r\ndrainedFrames="+std::to_wstring(windowCapture.drained)+L"\r\n"+windowCapture.Detail();
     }
