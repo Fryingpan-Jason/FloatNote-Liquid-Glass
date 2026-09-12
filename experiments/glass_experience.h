@@ -86,7 +86,8 @@ void SyncExperienceUI() {
     experienceIsland.Update(anchor,GetDpiForWindow(g_window),g_isVisible && (experienceFolded || IsWindowVisible(g_window)) && !IsIconic(g_window),
         state.pinned,state.passThrough,experiencePanel.Visible() || experienceCloseDialogOpen || experienceColorDialogOpen,
         g_window,ScaleForDpi(g_window,NoteCornerRadius()),experienceFolded || ExperienceAbsorbing(),
-        experienceAbsorbProgress,ExperienceAbsorbing());
+        experienceAbsorbProgress,ExperienceAbsorbing(),g_settings.themeColor,
+        std::max(g_settings.passThrough?0:1,MulDiv(EffectiveOpacityPercent(),255,100)));
     // Activation/restoration can raise the note above its independent hint.
     // Insert the controls immediately above the note, preserving applications
     // already above it rather than raising the controls to the top of the band.

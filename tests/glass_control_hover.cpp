@@ -17,6 +17,7 @@
 // Inspect the actual controller geometry without opening windows or moving the
 // user's pointer. All platform/library headers are loaded before this test-only
 // access switch; production API and implementation remain unchanged.
+#include "../src/glass_control_appearance.h"
 #define private public
 #include "../experiments/glass_control_island.h"
 #undef private
