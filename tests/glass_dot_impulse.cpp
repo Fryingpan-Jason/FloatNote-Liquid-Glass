@@ -14,6 +14,7 @@
 #include <cstdio>
 #include <cstdlib>
 
+#include "../src/glass_control_appearance.h"
 #define private public
 #include "../experiments/glass_control_island.h"
 #undef private

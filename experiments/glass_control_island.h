@@ -14,6 +14,7 @@
 #include <functional>
 #include <string>
 #include <utility>
+#include "../src/glass_control_appearance.h"
 
 namespace GlassControlIsland {
 
@@ -23,8 +24,7 @@ namespace Detail {
 // elasticity without changing its anchored edge or its hit-test footprint.
 struct Spring {
     float value = 0, velocity = 0;
-    bool Step(float target, float seconds) {
-        constexpr float frequency = 22.0f, damping = 0.74f;
+    bool Step(float target, float seconds, float frequency=22.0f, float damping=0.74f) {
         const float dt = std::clamp(seconds, 0.0f, 1.0f);
         const float decayRate = frequency * damping;
         const float dampedFrequency = frequency * std::sqrt(1.0f - damping * damping);
@@ -99,7 +99,7 @@ public:
                     static_cast<LONG>(std::lround(centerY + radius))};
         }
     };
-    Controller() = default;
+    Controller() {appearanceFade_.Reset(RGB(0,0,0));}
     Controller(const Controller&) = delete;
     Controller& operator=(const Controller&) = delete;
     ~Controller() { Destroy(); }
@@ -186,7 +186,8 @@ public:
 
     void Update(const RECT& noteRect, UINT dpi, bool visible, bool topmost,
                 bool passThrough, bool menuOpen, HWND noteWindow = nullptr, int cornerRadiusPx = 0,
-                bool folded = false, float foldProgress = 1.0f, bool noteTransition = false) {
+                bool folded = false, float foldProgress = 1.0f, bool noteTransition = false,
+                COLORREF backingColour=0,int backingAlpha=0) {
         if (!window_)
             return;
         const UINT newDpi = dpi ? dpi : 96;
@@ -206,7 +207,11 @@ public:
         menuOpen_ = effectiveMenuOpen;
         // Retain the API for the host, but note/body hover and note capture are
         // deliberately no longer expansion sources, including click-through.
-        (void)noteWindow;
+        DWORD affinity=WDA_NONE;
+        if(noteWindow)GetWindowDisplayAffinity(noteWindow,&affinity);
+        appearanceRequest_.note=noteRect;appearanceRequest_.tint=backingColour;
+        appearanceRequest_.radius=cornerRadiusPx;
+        appearanceRequest_.alpha=!folded && affinity==WDA_EXCLUDEFROMCAPTURE?std::clamp(backingAlpha,0,255):0;
         noteRect_ = noteRect;
         cornerRadiusPx_ = std::max(0, cornerRadiusPx);
         const bool previousBelow = below_;
@@ -239,6 +244,7 @@ public:
                          (flags & ~(SWP_SHOWWINDOW | SWP_HIDEWINDOW)));
         }
         if (!visible) {
+            appearanceRequest_.enabled=false;appearanceSampler_.Submit(appearanceRequest_);
             KillTimer(window_, kHoverTimer);
             KillTimer(window_, kMotionTimer);
             motionRunning_ = false;
@@ -273,9 +279,12 @@ public:
         PollHover();
         if (geometryChanged || appearanceChanged || visibilityChanged || previousBelow != below_)
             Render();
+        PollAppearance();
     }
 
     void Destroy() {
+        appearanceSampler_.Stop();
+        for(auto& raster:rasters_)raster.Clear();
         closePointerDown_ = false;
         if (closeWindow_) {
             if (GetCapture() == closeWindow_) ReleaseCapture();
@@ -378,6 +387,13 @@ private:
     Detail::Spring foldedHover_;
     Detail::DotImpulse dotImpulse_;
     float settingsTint_ = 0, closeTint_ = 0;
+    std::array<GlassControlAppearance::Raster,2> rasters_;
+    GlassControlAppearance::Sampler appearanceSampler_;
+    GlassControlAppearance::Request appearanceRequest_;
+    GlassAutoInk::Decision appearanceDecision_;
+    GlassAutoInk::Fade appearanceFade_;
+    unsigned appearanceSeen_=0;
+    float lightAppearance_=0;
     float foldProgress_ = 1.0f;
     bool noteTransition_ = false, transitionToFold_ = false;
     float insideCenterY_ = 0, outsideCenterY_ = 0, foldedCenterY_ = 0;
@@ -666,6 +682,7 @@ private:
     void Animate() {
         if (!window_ || !visible_) return;
         if (reduceMotion_) {
+            lightAppearance_=GetRValue(appearanceFade_.target)/255.f;
             dotImpulse_.Clear();
             expansion_.value = expanded_ && ExpansionAllowed() ? 1.0f : 0.0f;
             expansion_.velocity = 0;
@@ -690,7 +707,11 @@ private:
         const ULONGLONG now = GetTickCount64();
         const float seconds = static_cast<float>(now - lastMotionTick_) / 1000.0f;
         lastMotionTick_ = now;
-        bool active = expansion_.Step(expanded_ && ExpansionAllowed() ? 1.0f : 0.0f, seconds);
+        // A faster, more pronounced rise and a short elastic settle. Retain
+        // velocity when the pointer reverses instead of restarting an easing.
+        bool active = expansion_.Step(expanded_ && ExpansionAllowed() ? 1.0f : 0.0f, seconds, 32.0f, 0.72f);
+        lightAppearance_=GetRValue(appearanceFade_.Sample(double(now)))/255.f;
+        active |= appearanceFade_.Running(double(now));
         active |= foldedHover_.Step(folded_ && !noteTransition_ && !inputSuppressed_ && hover_ ? 1.0f : 0.0f, seconds);
         active |= Detail::Fade(settingsTint_, hover_ && !closeHover_ && !inputSuppressed_ && !noteTransition_ ? 1.0f : 0.0f, seconds);
         active |= Detail::Fade(closeTint_, closeHover_ && ExpansionAllowed() ? 1.0f : 0.0f, seconds);
@@ -702,6 +723,28 @@ private:
         if (!active) {
             KillTimer(window_, kMotionTimer);
             motionRunning_ = false;
+        }
+        PollAppearance();
+    }
+
+    void PollAppearance() {
+        auto request=appearanceRequest_;
+        const auto rectangles=VisibleSurfaceRects();request.surface=rectangles[0];
+        if(rectangles[1].right>rectangles[1].left)UnionRect(&request.surface,&request.surface,&rectangles[1]);
+        request.padding=std::max(6,Scale(6));request.guard=std::max(2,Scale(3));
+        request.enabled=visible_ && !highContrast_ && !noteTransition_ && !inputSuppressed_;
+        appearanceSampler_.Submit(request);
+        double share=0;
+        if(appearanceSampler_.Read(appearanceSeen_,share))appearanceDecision_.Update(share,double(GetTickCount64()));
+        // Keep the chosen X colour throughout red hover, including its retreat.
+        if(closeHover_ || closePointerDown_ || closeTint_>.001f) {
+            const int c=int(std::lround(lightAppearance_*255));appearanceFade_.Reset(RGB(c,c,c));return;
+        }
+        if(!request.enabled || !appearanceDecision_.valid)return;
+        const COLORREF target=appearanceDecision_.white?RGB(255,255,255):RGB(0,0,0);
+        if(!appearanceFade_.initialized || appearanceFade_.target!=target) {
+            const int c=int(std::lround(lightAppearance_*255));
+            appearanceFade_.Aim(target,RGB(c,c,c),double(GetTickCount64()));Animate();
         }
     }
 
@@ -777,22 +820,9 @@ private:
         const int height = static_cast<int>(bounds_.bottom - bounds_.top);
         if (width <= 0 || height <= 0)
             return;
-        BITMAPINFO info{};
-        info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-        info.bmiHeader.biWidth = width;
-        info.bmiHeader.biHeight = -height;
-        info.bmiHeader.biPlanes = 1;
-        info.bmiHeader.biBitCount = 32;
-        info.bmiHeader.biCompression = BI_RGB;
-        void* pixels = nullptr;
-        HDC dc = CreateCompatibleDC(nullptr);
-        HBITMAP dib = CreateDIBSection(dc, &info, DIB_RGB_COLORS, &pixels, nullptr, 0);
-        if (!dc || !dib || !pixels) {
-            if (dib) DeleteObject(dib);
-            if (dc) DeleteDC(dc);
-            return;
-        }
-        const HGDIOBJ old = SelectObject(dc, dib);
+        auto& raster=rasters_[close?1:0];
+        if(!raster.Ensure(width,height))return;
+        void* pixels=raster.pixels;HDC dc=raster.dc;
         {
             // GDI+ writes premultiplied BGRA directly, including edge coverage.
             // Do not re-premultiply these pixels after drawing.
@@ -838,15 +868,12 @@ private:
             graphics.TranslateTransform(38.0f, centerY);
             graphics.ScaleTransform(surface.width / 72.0f, 1.0f);
             graphics.TranslateTransform(-38.0f, -centerY);
-            const float materialWeight = std::max(glyphAlpha, folded_ ? foldProgress_ : 0.0f);
-            Gdiplus::Color background = Mix(Gdiplus::Color(248, 64, 66, 70),
-                                              Gdiplus::Color(248, 48, 50, 54), materialWeight);
-            Gdiplus::Color settingsBackground = Mix(background, Gdiplus::Color(252, 72, 75, 80), settingsTint_);
+            Gdiplus::Color background = Mix(Gdiplus::Color(255,0,0,0),Gdiplus::Color(255,255,255,255),lightAppearance_);
+            Gdiplus::Color settingsBackground = background;
             Gdiplus::Color closeBackground = Mix(background, Gdiplus::Color(255, 220, 52, 65), closeTint_);
             closeBackground = Mix(settingsBackground, closeBackground, separation);
-            Gdiplus::Color foreground(255, 245, 247, 251);
-            Gdiplus::Color closeForeground = Mix(Gdiplus::Color(255, 255, 112, 113),
-                                                   Gdiplus::Color(255, 255, 255, 255), closeTint_);
+            Gdiplus::Color foreground(255,255-background.GetR(),255-background.GetG(),255-background.GetB());
+            Gdiplus::Color closeForeground = foreground;
             if (highContrast_) {
                 const COLORREF bg = GetSysColor(COLOR_BTNFACE), fg = GetSysColor(COLOR_BTNTEXT);
                 settingsBackground = Gdiplus::Color(255, GetRValue(bg), GetGValue(bg), GetBValue(bg));
@@ -870,9 +897,7 @@ private:
             Gdiplus::SolidBrush closeFill(closeBackground);
             graphics.FillPath(&closeFill, &path);
             graphics.Restore(surfaceClip);
-            Gdiplus::Pen rim(Gdiplus::Color(highContrast_ ? 255 : 52, foreground.GetR(), foreground.GetG(),
-                                           foreground.GetB()), 0.65f);
-            graphics.DrawPath(&rim, &path);
+            if(highContrast_) {Gdiplus::Pen rim(foreground,0.65f);graphics.DrawPath(&rim,&path);}
             if (glyphAlpha > 0) {
                 Gdiplus::Color crossColor(static_cast<BYTE>(255 * glyphAlpha), closeForeground.GetR(),
                                           closeForeground.GetG(), closeForeground.GetB());
@@ -887,6 +912,10 @@ private:
                 line.SetStartCap(Gdiplus::LineCapRound);
                 line.SetEndCap(Gdiplus::LineCapRound);
                 Gdiplus::SolidBrush knob(glyph);
+                const auto glyphTransform=graphics.Save();
+                graphics.TranslateTransform(24,centerY);
+                graphics.ScaleTransform(1+.06f*settingsTint_,1+.06f*settingsTint_);
+                graphics.TranslateTransform(-24,-centerY);
                 // Original vector artwork: three adjustment tracks with alternating
                 // handles, not a vendor font glyph or an embedded platform asset.
                 const float rows[] = {centerY - 5.0f, centerY, centerY + 5.0f};
@@ -897,9 +926,9 @@ private:
                     graphics.FillEllipse(&cutout, handles[row] - 3, rows[row] - 3, 6.0f, 6.0f);
                     graphics.FillEllipse(&knob, handles[row] - 1.9f, rows[row] - 1.9f, 3.8f, 3.8f);
                 }
+                graphics.Restore(glyphTransform);
                 if (passThrough_) {
-                    Gdiplus::SolidBrush status(highContrast_ ? glyph :
-                        Gdiplus::Color(static_cast<BYTE>(255 * glyphAlpha), 111, 190, 255));
+                    Gdiplus::SolidBrush status(glyph);
                     graphics.FillEllipse(&status, 36.0f, centerY + 5.0f, 2.5f, 2.5f);
                 }
             }
@@ -919,9 +948,6 @@ private:
         SIZE size{width, height};
         BLENDFUNCTION blend{AC_SRC_OVER, 0, 255, AC_SRC_ALPHA};
         UpdateLayeredWindow(target, nullptr, &destination, &size, dc, &source, 0, &blend, ULW_ALPHA);
-        SelectObject(dc, old);
-        DeleteObject(dib);
-        DeleteDC(dc);
     }
 
     void FinishPointer(bool click) {
@@ -1123,6 +1149,7 @@ private:
             }
             if (wp == kHoverTimer) {
                 PollHover();
+                PollAppearance();
                 return 0;
             }
             break;

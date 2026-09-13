@@ -4,6 +4,7 @@
 #include "glass_close_behavior.h"
 #include "glass_experience_policy.h"
 #include "glass_absorb_motion.h"
+#include "../src/glass_window_stacking.h"
 #include <functional>
 
 namespace {
@@ -85,21 +86,15 @@ void SyncExperienceUI() {
     experienceIsland.Update(anchor,GetDpiForWindow(g_window),g_isVisible && (experienceFolded || IsWindowVisible(g_window)) && !IsIconic(g_window),
         state.pinned,state.passThrough,experiencePanel.Visible() || experienceCloseDialogOpen || experienceColorDialogOpen,
         g_window,ScaleForDpi(g_window,NoteCornerRadius()),experienceFolded || ExperienceAbsorbing(),
-        experienceAbsorbProgress,ExperienceAbsorbing());
+        experienceAbsorbProgress,ExperienceAbsorbing(),g_settings.themeColor,
+        std::max(g_settings.passThrough?0:1,MulDiv(EffectiveOpacityPercent(),255,100)));
     // Activation/restoration can raise the note above its independent hint.
     // Insert the controls immediately above the note, preserving applications
     // already above it rather than raising the controls to the top of the band.
     if(IsWindowVisible(g_window) && IsWindowVisible(experienceIsland.Window())) {
-        int remaining=64;
-        for(HWND above=GetWindow(experienceIsland.Window(),GW_HWNDPREV);above && --remaining;
-            above=GetWindow(above,GW_HWNDPREV))if(above==g_window) {
-                HWND insert=GetWindow(g_window,GW_HWNDPREV);
-                if(!insert || (!state.pinned && (GetWindowLongPtrW(insert,GWL_EXSTYLE)&WS_EX_TOPMOST)))insert=HWND_TOP;
-                SetWindowPos(experienceIsland.Window(),insert,0,0,0,0,SWP_NOMOVE|SWP_NOSIZE|SWP_NOACTIVATE);
-                if(IsWindowVisible(experienceIsland.CloseWindow()))SetWindowPos(experienceIsland.CloseWindow(),insert,
-                    0,0,0,0,SWP_NOMOVE|SWP_NOSIZE|SWP_NOACTIVATE);
-                break;
-            }
+        GlassWindowStacking::PlaceAbove(experienceIsland.Window(),g_window,state.pinned);
+        if(IsWindowVisible(experienceIsland.CloseWindow()))
+            GlassWindowStacking::PlaceAbove(experienceIsland.CloseWindow(),experienceIsland.Window(),state.pinned);
     }
     SyncExperienceCapture();
     experiencePanel.UpdateState(state);
@@ -265,7 +260,8 @@ void ExpandExperienceNote() {
     experienceAbsorbInputBlocked=true;experienceAbsorbReleased=0;
     experienceEndpointPresented=false;experienceMotionGeometryMismatches=0;experienceAbsorbProgress=1;experienceAbsorbAlpha=1;
     experienceIsland.SetInputSuppressed(true);
-    SaveExperienceRestoreSize();SaveSettings();
+    // Persist the final restore state at completion, not on the click path.
+    g_backdrop.SetPresentationMotion(true);
     // Establish the real start at the currently drawn (possibly hovered) dot.
     // Geometry is never enlarged after the curve computes its pixel bounds.
     SyncExperienceUI();
@@ -337,6 +333,7 @@ void MaybeAbsorbExperienceResize() {
         experienceNativeSizing=false;return;
     }
     experienceNativeSizing=false;experiencePanel.Close(false);KillTimer(g_window,kCaretTimer);
+    g_backdrop.SetPresentationMotion(true);
     // Take over this gesture before moving/hiding the grip. Its queued up or
     // capture-lost notifications may still arrive, but cannot restart resizing.
     g_pointerDown=false;g_pointerDragged=false;
@@ -372,7 +369,7 @@ void TickExperienceAbsorb() {
             // the dot/text. Never skip from the last larger rectangle to hidden.
             if(frame.progress>=1)experienceEndpointPresented=true;
         } else if(!restoring) {
-            ShowWindow(g_window,SW_HIDE);g_backdrop.Enable(g_window,false);
+            ShowWindow(g_window,SW_HIDE);g_backdrop.SuspendForFold();
             g_backdrop.SetPresentationOpacity(1.0f);
             experienceAbsorbing=false;experienceFolded=true;experienceAbsorbAlpha=1;
             // Keep saved/restore geometry at the original thin-card anchor, not
@@ -383,6 +380,7 @@ void TickExperienceAbsorb() {
             SaveSettings();SaveExperienceRestoreSize();
         } else {
             experienceRestoring=false;experienceAbsorbAlpha=1;
+            g_backdrop.SetPresentationMotion(false);
             g_backdrop.SetPresentationOpacity(1.0f);
             UpdateLayout(g_window);SaveSettings();SaveExperienceRestoreSize();SaveGlassLabPreferences();
         }
@@ -496,6 +494,9 @@ void CreateExperienceUI() {
 }
 void DestroyExperienceUI() {
     KillTimer(g_window,73);KillTimer(g_window,74);KillTimer(g_window,75);KillTimer(g_window,76);
+    // Restore persistence is deferred off the click path; closing mid-motion
+    // must still save the intended final state before controls are destroyed.
+    if(experienceReady)SaveExperienceRestoreSize();
     SaveExperienceMaterial();experienceReady=false;
     // The popup borrows the note's dispatcher queue; destroy it first.
     experiencePanel.Destroy();experienceIsland.Destroy();

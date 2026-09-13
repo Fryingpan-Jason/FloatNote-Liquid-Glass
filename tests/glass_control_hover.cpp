@@ -17,6 +17,7 @@
 // Inspect the actual controller geometry without opening windows or moving the
 // user's pointer. All platform/library headers are loaded before this test-only
 // access switch; production API and implementation remain unchanged.
+#include "../src/glass_control_appearance.h"
 #define private public
 #include "../experiments/glass_control_island.h"
 #undef private
@@ -65,7 +66,7 @@ int main() {
             // Reproduce a stationary pointer at the old hint while all actual
             // spring frames advance, settle, reverse and advance again.
             for (int frame = 0; frame < 240; ++frame) {
-                control.expansion_.Step(frame < 100 || frame >= 140 ? 1.0f : 0.0f, 1.0f / 60.0f);
+                control.expansion_.Step(frame < 100 || frame >= 140 ? 1.0f : 0.0f, 1.0f / 60.0f,32.0f,0.72f);
                 const auto current = control.Surface();
                 const RECT corridor = control.RevealArea();
                 Check(EqualRect(&expected, &corridor), "Hover target moved with animation");

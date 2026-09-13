@@ -9,6 +9,7 @@
 #include "glass_lens.h"
 #include "glass_bevel.h"
 #include "glass_surface.h"
+#include "glass_auto_ink.h"
 #include <array>
 #include <cmath>
 #include <sstream>
@@ -19,6 +20,8 @@
 // Experimental, app-local renderer. No injected DLLs or DWM/driver modifications.
 // The original Windows backdrop owns the visual and remains the failure fallback.
 class GlassLabBackdrop {
+    friend struct GlassAdaptationTest;
+    friend struct GlassAutoInkTest;
     template<class T> using Ptr = Microsoft::WRL::ComPtr<T>;
     NativeBackdrop system;
     Ptr<ABI::Windows::UI::Composition::ICompositionBrush> originalBrush;
@@ -37,8 +40,26 @@ class GlassLabBackdrop {
     std::array<Ptr<ID3D11Texture2D>, 2> blurred;
     std::array<Ptr<ID3D11ShaderResourceView>, 2> blurredViews;
     std::array<Ptr<ID3D11RenderTargetView>, 2> blurredTargets;
+    std::array<Ptr<ID3D11Texture2D>,2> adaptation;
+    std::array<Ptr<ID3D11ShaderResourceView>,2> adaptationViews;
+    std::array<Ptr<ID3D11RenderTargetView>,2> adaptationTargets;
+    int adaptationWidth=0,adaptationHeight=0,adaptationIndex=0;
+    double adaptationAt=0,adaptationUntil=0;
     Ptr<ID3D11VertexShader> vertex;
-    Ptr<ID3D11PixelShader> blurShader, glassShader;
+    Ptr<ID3D11VertexShader> inkVertex;
+    Ptr<ID3D11Texture2D> inkTarget,inkReadback;
+    Ptr<ID3D11RenderTargetView> inkTargetView;
+    GlassAutoInk::Decision inkDecision;
+    RECT inkRegion{};
+    bool inkEnabled=false,inkPending=false,inkDirty=false,inkFrameValid=false,inkUnavailable=false;
+    unsigned inkGeneration=0,inkPendingGeneration=0;
+    COLORREF inkTint=0;
+    int inkAlpha=0;
+    double inkSubmittedAt=0;
+    double inkLastShare=.5;
+    unsigned inkSubmissions=0,inkPollMisses=0;
+    static constexpr int inkWidth=32,inkHeight=16;
+    Ptr<ID3D11PixelShader> blurShader, glassShader, adaptationShader;
     Ptr<ID3D11Buffer> constants;
     Ptr<ID3D11SamplerState> sampler;
     HWND hwnd = nullptr;
@@ -51,7 +72,8 @@ class GlassLabBackdrop {
     // Keep a halo for wide-angle lens/environment samples plus the blur kernel.
     static constexpr int padding = 512;
     bool enabled = false, haveDesktop = false, needRender = true;
-    bool frozen = false, failed = false;
+    bool frozen = false, failed = false, presentationMotion = false;
+    unsigned gpuInitializations=0, bufferResizes=0;
     ULONGLONG retryAt = 0;
     unsigned long long frames = 0, renders = 0, copies = 0;
     std::wstring adapterName;
@@ -83,7 +105,7 @@ class GlassLabBackdrop {
             });
         } catch(...) {signal->borderAccess.store(-2);}
     }
-    struct alignas(16) Constants {
+    struct Constants {
         float dimensions[4]; // patch width/height, window width/height
         float material[4]; // sigma, edge bend, corner radius, glass mode
         float direction[4]; // blur x/y, padding, sharp mixture
@@ -92,18 +114,23 @@ class GlassLabBackdrop {
         float response[4]; // dispersion, adaptive contrast, optical model, profile
         float surface[4]; // base optical depth, relief height, reflection strength, rim width
         float field[4]; // old Poisson field grid and cell spacing
-        float finish[4]; // edge roughness, environment colour in reflections, reserved
+        float finish[4]; // roughness, environment colour, adaptation blend, history valid
         float controlMasks[4][4]; // current/previous visible control bounds in patch pixels
+        float inkProbe[4]; // normalized text region, used only by the tiny ink probe
     };
+    static_assert(sizeof(Constants)%16==0);
+    Constants inkFrame{};
     inline static const std::string shaderSource = std::string(GlassLens::Shader) + GlassBevel::Shader + R"HLSL(
 cbuffer Params : register(b0) {
     float4 dims; float4 material; float4 direction; float4 bounds; float4 optics;
     float4 response; float4 surface; float4 field; float4 finish;
     float4 controlMasks[4];
+    float4 inkProbe;
 };
 Texture2D source0 : register(t0);
 Texture2D source1 : register(t1);
 Texture2D<float4> oldHeightField : register(t2);
+Texture2D<float4> adaptationField : register(t3);
 SamplerState linearClamp : register(s0);
 struct V { float4 p:SV_POSITION; float2 uv:TEXCOORD0; };
 V VS(uint id:SV_VertexID) {
@@ -173,6 +200,34 @@ float4 Blur(V i):SV_TARGET {
         total+=2*w;
     }
     return c/total;
+}
+V VSInk(uint id:SV_VertexID) {
+    V o=VS(id);o.uv=inkProbe.xy+o.uv*inkProbe.zw;return o;
+}
+float4 Adapt(V i):SV_TARGET {
+    // Store local colour and spatial luminance variance. Detail is measured
+    // BEFORE blur/refraction, so equal-mean text and flat grey remain distinct.
+    // Overlapping footprints and bilinear reconstruction smooth this tiny field.
+    float2 p=i.uv*dims.zw+direction.zz;
+    float4 moments=0;
+    // Keep this tiny pass compact: duplicating the capture-repair code 25
+    // times adds avoidable startup compilation cost.
+    [loop] for(int y=-2;y<=2;y++) {
+        [loop] for(int x=-2;x<=2;x++) {
+            float2 offset=float2(x*4.7+y*.63,y*4.3+x*.37)*optics.z;
+            float3 colour=rawControlFree(p+offset,true).rgb;
+            float luminance=dot(colour,float3(.2126,.7152,.0722));
+            moments+=float4(colour,luminance*luminance);
+        }
+    }
+    moments/=25;
+    float mean=dot(moments.rgb,float3(.2126,.7152,.0722));
+    moments.a=max(0,moments.a-mean*mean);
+    // Compute variance before temporal filtering: a flat white-to-black scene
+    // transition must not be misclassified as spatial detail.
+    if(finish.w>.5)
+        moments=lerp(adaptationField.SampleLevel(linearClamp,i.uv,0),moments,finish.z);
+    return moments;
 }
 float3 transmission(float2 pixel) {
     return lerp(source0.SampleLevel(linearClamp,bounded(pixel),0).rgb,
@@ -318,20 +373,39 @@ float4 Glass(V i):SV_TARGET {
         environment+=(source0.SampleLevel(linearClamp,bounded(reflected+outward*span),0).rgb
                      +source0.SampleLevel(linearClamp,bounded(reflected-outward*span),0).rgb)*.1;
         float envLum=dot(environment,float3(.2126,.7152,.0722));
-        float localLum=dot(c,float3(.2126,.7152,.0722));
         float3 reflectedColour=lerp(float3(envLum,envLum,envLum),environment,saturate(finish.y));
         c=lerp(c,reflectedColour,saturate(surface.z*shoulder*(.025+.25*fresnel)));
         // Art-directed lighting, not a claim about Apple's private BRDF:
         // narrow upper-left key plus a broad lower reflected light. A dim
         // contour remains between lobes instead of an invariant white outline.
-        float visibility=response.y*(.10+.90*envLum);
-        c*=1-visibility*edge.z/max(edge.x,.0001);
-        // Preserve contrast on white with a fine paired dark line, not the old
-        // broad grey inner shadow. Shadow is independent of highlight strength.
-        c*=1-response.y*shoulder*.012*saturate(envLum);
+        float detail=0,sceneLum=envLum;
+        float3 sceneColour=environment;
+        if(response.y>.5) {
+            float4 stats=adaptationField.SampleLevel(linearClamp,i.uv,0);
+            sceneColour=stats.rgb;
+            sceneLum=dot(sceneColour,float3(.2126,.7152,.0722));
+            detail=smoothstep(.025,.20,sqrt(max(0,stats.a)));
+            // Tonal headroom is confined to the curved shoulder. The centre
+            // stays unchanged. A broad normal-dependent roll replaces the
+            // fixed inner grey stroke; busy backgrounds need more separation.
+            float rollWidth=max(2*scale,min(band*.48,12*scale));
+            float roll=1-smoothstep(0,rollWidth,depth);
+            float curvature=saturate(grazing*3);
+            float upper=saturate(dot(outward,normalize(float2(-.65,-.76))));
+            float bright=smoothstep(.40,.95,sceneLum);
+            float shade=roll*(.28+.72*curvature)*(.045+.055*upper+.025*detail)*bright;
+            c*=1-shade;
+            // Very small contrast floor between the reflection lobes, with
+            // reduced weight on featureless white. Keep integrated edge AA.
+            c*=1-(.12+.32*detail)*bright*edge.z/max(edge.x,.0001);
+            float lower=saturate(dot(normal.xy,normalize(float2(.55,.84))));
+            float sheen=roll*lower*(.018+.035*detail)*(1-.65*bright)*surface.z;
+            float3 sheenColour=lerp(float3(1,1,1),sceneColour/max(max(sceneColour.r,sceneColour.g),max(sceneColour.b,.001)),saturate(finish.y)*.35);
+            c=lerp(c,sheenColour,sheen);
+        }
         float peak=max(environment.r,max(environment.g,environment.b));
         float3 lightColour=lerp(float3(1,1,1),environment/max(peak,.001),saturate(finish.y)*.6*smoothstep(.04,.3,peak));
-        float specular=optics.y*edge.y/max(edge.x,.0001)*(.75+.25*(1-localLum));
+        float specular=optics.y*edge.y/max(edge.x,.0001)*(.70+.30*(1-sceneLum)+.12*detail);
         c=lerp(c,lightColour,saturate(specular));
         }
     }
@@ -359,10 +433,24 @@ float4 Glass(V i):SV_TARGET {
         oldHeightView.Reset();oldHeightTexture.Reset();
         desktop.Reset(); patchView.Reset(); patch.Reset();
         for (int i=0;i<2;i++) { blurredTargets[i].Reset(); blurredViews[i].Reset(); blurred[i].Reset(); }
-        vertex.Reset(); blurShader.Reset(); glassShader.Reset(); constants.Reset(); sampler.Reset();
+        for(int i=0;i<2;i++) {adaptationTargets[i].Reset();adaptationViews[i].Reset();adaptation[i].Reset();}
+        adaptationWidth=adaptationHeight=0;adaptationAt=adaptationUntil=0;
+        inkTargetView.Reset();inkTarget.Reset();inkReadback.Reset();inkVertex.Reset();
+        inkPending=inkFrameValid=inkUnavailable=false;inkDecision.Reset();
+        vertex.Reset(); blurShader.Reset(); glassShader.Reset(); adaptationShader.Reset(); constants.Reset(); sampler.Reset();
         context.Reset(); device.Reset(); width=height=0; monitor=nullptr; haveDesktop=false;
     }
     bool Check(HRESULT hr) { lastError=hr; return SUCCEEDED(hr); }
+    struct ShaderBytecode {
+        Ptr<ID3DBlob> vertex, blur, glass, adapt, ink;
+        unsigned compilations=0;
+    };
+    static ShaderBytecode& CachedShaders() {
+        // All renderer operations run on the UI thread. Bytecode is independent
+        // of the D3D device and survives suspension, fallback and monitor changes.
+        static ShaderBytecode shaders;
+        return shaders;
+    }
     bool CaptureExclusion(bool value) {
         const DWORD desired=value ? WDA_EXCLUDEFROMCAPTURE : WDA_NONE;
         DWORD current=~0u;
@@ -372,6 +460,7 @@ float4 Glass(V i):SV_TARGET {
     }
     bool Initialize() {
         ReleaseGpu();
+        ++gpuInitializations;
         monitor=MonitorFromWindow(hwnd,MONITOR_DEFAULTTONEAREST);
         Ptr<IDXGIFactory1> factory;
         if (!Check(CreateDXGIFactory1(IID_PPV_ARGS(&factory)))) return false;
@@ -401,13 +490,13 @@ float4 Glass(V i):SV_TARGET {
         if(SUCCEEDED(device.As(&pacing))) pacing->SetMaximumFrameLatency(1);
         windowCapture.SetSignal(signal);
 
-        Ptr<ID3DBlob> vs,ps,gs,errors;
-        if(!Check(D3DCompile(shaderSource.data(),shaderSource.size(),nullptr,nullptr,nullptr,"VS","vs_4_0",D3DCOMPILE_OPTIMIZATION_LEVEL3,0,&vs,&errors))) return false;
-        if(!Check(D3DCompile(shaderSource.data(),shaderSource.size(),nullptr,nullptr,nullptr,"Blur","ps_4_0",D3DCOMPILE_OPTIMIZATION_LEVEL3,0,&ps,&errors))) return false;
-        if(!Check(D3DCompile(shaderSource.data(),shaderSource.size(),nullptr,nullptr,nullptr,"Glass","ps_4_0",D3DCOMPILE_OPTIMIZATION_LEVEL3,0,&gs,&errors))) return false;
-        if(!Check(device->CreateVertexShader(vs->GetBufferPointer(),vs->GetBufferSize(),nullptr,&vertex)) ||
-           !Check(device->CreatePixelShader(ps->GetBufferPointer(),ps->GetBufferSize(),nullptr,&blurShader)) ||
-           !Check(device->CreatePixelShader(gs->GetBufferPointer(),gs->GetBufferSize(),nullptr,&glassShader))) return false;
+        if(!Check(WarmShaderBytecode()))return false;
+        const auto& shaders=CachedShaders();
+        if(!Check(device->CreateVertexShader(shaders.vertex->GetBufferPointer(),shaders.vertex->GetBufferSize(),nullptr,&vertex)) ||
+           !Check(device->CreateVertexShader(shaders.ink->GetBufferPointer(),shaders.ink->GetBufferSize(),nullptr,&inkVertex)) ||
+           !Check(device->CreatePixelShader(shaders.blur->GetBufferPointer(),shaders.blur->GetBufferSize(),nullptr,&blurShader)) ||
+           !Check(device->CreatePixelShader(shaders.adapt->GetBufferPointer(),shaders.adapt->GetBufferSize(),nullptr,&adaptationShader)) ||
+           !Check(device->CreatePixelShader(shaders.glass->GetBufferPointer(),shaders.glass->GetBufferSize(),nullptr,&glassShader))) return false;
         D3D11_BUFFER_DESC cb{}; cb.ByteWidth=sizeof(Constants); cb.Usage=D3D11_USAGE_DEFAULT; cb.BindFlags=D3D11_BIND_CONSTANT_BUFFER;
         if(!Check(device->CreateBuffer(&cb,nullptr,&constants))) return false;
         D3D11_SAMPLER_DESC sd{}; sd.Filter=D3D11_FILTER_MIN_MAG_MIP_LINEAR;
@@ -417,6 +506,8 @@ float4 Glass(V i):SV_TARGET {
     bool ResizeBuffers(int w,int h) {
         if(w==width && h==height && swap) return true;
         if(w<=0 || h<=0 || w>3000 || h>2200) { lastError=E_INVALIDARG; return false; }
+        ++bufferResizes;
+        inkFrameValid=false;++inkGeneration;
         context->ClearState();
         if(swap) {
             if(!Check(swap->ResizeBuffers(2,w,h,DXGI_FORMAT_UNKNOWN,0))) return false;
@@ -433,6 +524,7 @@ float4 Glass(V i):SV_TARGET {
             Ptr<ABI::Windows::UI::Composition::ICompositorInterop> interop;
             if(!Check(system.compositor.As(&interop)) || !Check(interop->CreateCompositionSurfaceForSwapChain(swap.Get(),&surface))) return false;
             if(!Check(system.compositor->CreateSurfaceBrushWithSurface(surface.Get(),&surfaceBrush))) return false;
+            surfaceBrush->put_Stretch(ABI::Windows::UI::Composition::CompositionStretch_Fill);
         }
         patchView.Reset(); patch.Reset();
         D3D11_TEXTURE2D_DESC t{}; t.Width=w+padding*2; t.Height=h+padding*2;
@@ -448,6 +540,22 @@ float4 Glass(V i):SV_TARGET {
         }
         width=w; height=h; needRender=true; return true;
     }
+    bool PrepareAdaptation(float scale) {
+        const int w=std::clamp(int(std::ceil(width/(8*scale))),8,128);
+        const int h=std::clamp(int(std::ceil(height/(8*scale))),8,96);
+        if(w==adaptationWidth && h==adaptationHeight && adaptation[0] && adaptation[1])return true;
+        adaptationAt=0;
+        D3D11_TEXTURE2D_DESC t{};t.Width=w;t.Height=h;t.MipLevels=t.ArraySize=1;
+        t.Format=DXGI_FORMAT_R16G16B16A16_FLOAT;t.SampleDesc.Count=1;
+        t.Usage=D3D11_USAGE_DEFAULT;t.BindFlags=D3D11_BIND_RENDER_TARGET|D3D11_BIND_SHADER_RESOURCE;
+        for(int i=0;i<2;i++) {
+            adaptationTargets[i].Reset();adaptationViews[i].Reset();adaptation[i].Reset();
+            if(!Check(device->CreateTexture2D(&t,nullptr,&adaptation[i])) ||
+               !Check(device->CreateShaderResourceView(adaptation[i].Get(),nullptr,&adaptationViews[i])) ||
+               !Check(device->CreateRenderTargetView(adaptation[i].Get(),nullptr,&adaptationTargets[i])))return false;
+        }
+        adaptationWidth=w;adaptationHeight=h;adaptationIndex=0;return true;
+    }
     bool Capture() {
         if(frozen) return true;
         bool updated=false;
@@ -455,7 +563,7 @@ float4 Glass(V i):SV_TARGET {
         if(FAILED(result)) return Check(result);
         if(windowCapture.sourceChanged) needRender=true;
         if(result==S_FALSE) { haveDesktop=false; BindSystemBrush(); return true; }
-        if(updated) { ++frames; ++copies; haveDesktop=windowCapture.ready; needRender=true; }
+        if(updated) { ++frames; ++copies; haveDesktop=windowCapture.ready; needRender=true; adaptationUntil=GlassClockMs()+300; }
         if(updated && windowCapture.latestFrameAgeMs>0 && windowCapture.latestFrameAgeMs<2000)
             sourceAges[ageCount++%sourceAges.size()]=windowCapture.latestFrameAgeMs;
         return true;
@@ -481,7 +589,7 @@ float4 Glass(V i):SV_TARGET {
         const int right=std::min(static_cast<int>(td.Width),ox+width+2*padding);
         const int bottom=std::min(static_cast<int>(td.Height),oy+height+2*padding);
         if(right<=left || bottom<=top) return true;
-        ID3D11ShaderResourceView* empty[3]={}; context->PSSetShaderResources(0,3,empty);
+        ID3D11ShaderResourceView* empty[4]={}; context->PSSetShaderResources(0,4,empty);
         D3D11_BOX box{static_cast<UINT>(left),static_cast<UINT>(top),0,static_cast<UINT>(right),static_cast<UINT>(bottom),1};
         context->CopySubresourceRegion(patch.Get(),0,left-ox,top-oy,0,desktop.Get(),0,&box);
         valid={left-ox,top-oy,right-ox,bottom-oy};
@@ -511,27 +619,48 @@ float4 Glass(V i):SV_TARGET {
         D3D11_VIEWPORT viewport{0,0,c.dimensions[0],c.dimensions[1],0,1}; context->RSSetViewports(1,&viewport);
         context->PSSetShader(blurShader.Get(),nullptr,0);
         for(int i=0;i<2;i++) {
-            context->PSSetShaderResources(0,3,empty);
+            context->PSSetShaderResources(0,4,empty);
             context->OMSetRenderTargets(1,blurredTargets[i].GetAddressOf(),nullptr);
             c.direction[0]=i==0 ? 1.0f : 0.0f; c.direction[1]=i==1 ? 1.0f : 0.0f;
             context->UpdateSubresource(constants.Get(),0,nullptr,&c,0,0);
             ID3D11ShaderResourceView* src=i==0 ? patchView.Get() : blurredViews[0].Get();
             context->PSSetShaderResources(0,1,&src); context->Draw(3,0);
         }
-        context->PSSetShaderResources(0,3,empty);
+        context->OMSetRenderTargets(0,nullptr,nullptr);
+        context->PSSetShaderResources(0,4,empty);
+        const bool adapt=mode==2 && adaptiveContrast && !opticalOnly;
+        const double now=GlassClockMs();
+        if(adapt) {
+            if(!PrepareAdaptation(scale))return false;
+            // Reset on geometry changes / long suspension: never drag old scene
+            // statistics across the desktop. Smooth material response only,
+            // not the captured image, and never read GPU pixels on the CPU.
+            const bool history=adaptationAt>0 && now-adaptationAt<250 && EqualRect(&rect,&lastRect);
+            c.finish[2]=history ? float(1-std::exp(-(now-adaptationAt)/75.0)) : 1.0f;
+            c.finish[3]=history?1.0f:0.0f;
+            context->UpdateSubresource(constants.Get(),0,nullptr,&c,0,0);
+            viewport.Width=float(adaptationWidth);viewport.Height=float(adaptationHeight);context->RSSetViewports(1,&viewport);
+            const int next=1-adaptationIndex;
+            context->OMSetRenderTargets(1,adaptationTargets[next].GetAddressOf(),nullptr);
+            ID3D11ShaderResourceView* inputs[]={nullptr,patchView.Get(),nullptr,history?adaptationViews[adaptationIndex].Get():nullptr};
+            context->PSSetShaderResources(0,4,inputs);context->PSSetShader(adaptationShader.Get(),nullptr,0);context->Draw(3,0);
+            context->OMSetRenderTargets(0,nullptr,nullptr);context->PSSetShaderResources(0,4,empty);
+            adaptationIndex=next;adaptationAt=now;
+        } else adaptationAt=0;
         Ptr<ID3D11Texture2D> buffer; Ptr<ID3D11RenderTargetView> target;
         if(!Check(swap->GetBuffer(0,IID_PPV_ARGS(&buffer))) || !Check(device->CreateRenderTargetView(buffer.Get(),nullptr,&target))) return false;
         viewport.Width=float(width); viewport.Height=float(height); context->RSSetViewports(1,&viewport);
         context->OMSetRenderTargets(1,target.GetAddressOf(),nullptr);
         context->PSSetShader(glassShader.Get(),nullptr,0);
-        ID3D11ShaderResourceView* sources[]={blurredViews[1].Get(),patchView.Get(),oldHeightView.Get()}; context->PSSetShaderResources(0,3,sources);
+        ID3D11ShaderResourceView* sources[]={blurredViews[1].Get(),patchView.Get(),oldHeightView.Get(),adapt?adaptationViews[adaptationIndex].Get():nullptr}; context->PSSetShaderResources(0,4,sources);
         context->Draw(3,0);
-        context->OMSetRenderTargets(0,nullptr,nullptr); context->PSSetShaderResources(0,3,empty);
+        context->OMSetRenderTargets(0,nullptr,nullptr); context->PSSetShaderResources(0,4,empty);
         if(!Check(swap->Present(0,0))) return false;
         Ptr<ABI::Windows::UI::Composition::ISpriteVisual> sprite; system.visual.As(&sprite);
         Ptr<ABI::Windows::UI::Composition::ICompositionBrush> brush; surfaceBrush.As(&brush);
         sprite->put_Brush(brush.Get());
-        ++renders; needRender=false; lastRect=rect; return true;
+        inkFrame=c;inkFrameValid=true;inkDirty=true;
+        ++renders; needRender=adapt && now<adaptationUntil; lastRect=rect; return true;
     }
     void Fail() {
         frozen=false; failed=true; retryAt=GetTickCount64()+2000; ReleaseGpu(); BindSystemBrush();
@@ -539,6 +668,102 @@ float4 Glass(V i):SV_TARGET {
         const HRESULT failure=lastError;CaptureExclusion(false);lastError=failure;
     }
 public:
+    void SetInkRegion(const RECT& region) {
+        if(EqualRect(&region,&inkRegion))return;
+        inkRegion=region;inkDirty=true;++inkGeneration;
+    }
+    // Returns -1 for the existing theme-based Auto fallback, 0 dark, 1 light.
+    // Only the 2 KB probe can cross to the CPU, using nonblocking Map. Busy
+    // readbacks are skipped, never waited on. Native text/IME rendering stays intact.
+    int UpdateAutoInk(bool requested,COLORREF tint,int alpha,bool fallbackWhite) {
+        if(requested!=inkEnabled || tint!=inkTint || alpha!=inkAlpha) {
+            inkEnabled=requested;inkTint=tint;inkAlpha=alpha;++inkGeneration;
+            inkDirty=true;inkDecision.Reset(fallbackWhite);
+        }
+        if(!inkEnabled || mode!=2 || !enabled || failed || inkUnavailable || !haveDesktop || !inkFrameValid)return -1;
+        if(presentationMotion)return inkDecision.valid?int(inkDecision.white):-1;
+        const double now=GlassClockMs();
+        if(inkPending) {
+            D3D11_MAPPED_SUBRESOURCE mapped{};
+            const HRESULT hr=context->Map(inkReadback.Get(),0,D3D11_MAP_READ,D3D11_MAP_FLAG_DO_NOT_WAIT,&mapped);
+            if(SUCCEEDED(hr)) {
+                if(inkPendingGeneration==inkGeneration && now-inkSubmittedAt<500) {
+                    inkLastShare=GlassAutoInk::WhiteShare(mapped.pData,mapped.RowPitch,inkWidth,inkHeight,inkTint,inkAlpha);
+                    inkDecision.Update(inkLastShare,now);
+                }
+                context->Unmap(inkReadback.Get(),0);inkPending=false;
+            } else if(hr==DXGI_ERROR_WAS_STILL_DRAWING)++inkPollMisses;
+            else {inkUnavailable=true;return -1;}
+        }
+        if(inkDecision.valid)inkDecision.Update(inkLastShare,now);
+        if(!inkPending && inkDirty && now-inkSubmittedAt>=100) {
+            if(!inkTarget) {
+                D3D11_TEXTURE2D_DESC t{};t.Width=inkWidth;t.Height=inkHeight;t.ArraySize=t.MipLevels=1;
+                t.Format=DXGI_FORMAT_B8G8R8A8_UNORM;t.SampleDesc.Count=1;t.Usage=D3D11_USAGE_DEFAULT;t.BindFlags=D3D11_BIND_RENDER_TARGET;
+                if(FAILED(device->CreateTexture2D(&t,nullptr,&inkTarget)) || FAILED(device->CreateRenderTargetView(inkTarget.Get(),nullptr,&inkTargetView))) {
+                    inkUnavailable=true;return -1;
+                }
+                t.Usage=D3D11_USAGE_STAGING;t.BindFlags=0;t.CPUAccessFlags=D3D11_CPU_ACCESS_READ;
+                if(FAILED(device->CreateTexture2D(&t,nullptr,&inkReadback))){inkUnavailable=true;return -1;}
+            }
+            RECT region{std::clamp(inkRegion.left,0L,LONG(width-1)),std::clamp(inkRegion.top,0L,LONG(height-1)),
+                        std::clamp(inkRegion.right,1L,LONG(width)),std::clamp(inkRegion.bottom,1L,LONG(height))};
+            if(region.right<=region.left || region.bottom<=region.top)return -1;
+            Constants c=inkFrame;
+            c.inkProbe[0]=float(region.left)/width;c.inkProbe[1]=float(region.top)/height;
+            c.inkProbe[2]=float(region.right-region.left)/width;c.inkProbe[3]=float(region.bottom-region.top)/height;
+            context->UpdateSubresource(constants.Get(),0,nullptr,&c,0,0);
+            context->IASetInputLayout(nullptr);context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+            context->VSSetShader(inkVertex.Get(),nullptr,0);context->VSSetConstantBuffers(0,1,constants.GetAddressOf());
+            context->PSSetShader(glassShader.Get(),nullptr,0);context->PSSetConstantBuffers(0,1,constants.GetAddressOf());
+            context->PSSetSamplers(0,1,sampler.GetAddressOf());
+            D3D11_VIEWPORT v{0,0,float(inkWidth),float(inkHeight),0,1};context->RSSetViewports(1,&v);
+            context->OMSetRenderTargets(1,inkTargetView.GetAddressOf(),nullptr);
+            ID3D11ShaderResourceView* inputs[]={blurredViews[1].Get(),patchView.Get(),oldHeightView.Get(),adaptiveContrast&&!opticalOnly?adaptationViews[adaptationIndex].Get():nullptr};
+            context->PSSetShaderResources(0,4,inputs);context->Draw(3,0);
+            context->OMSetRenderTargets(0,nullptr,nullptr);ID3D11ShaderResourceView* empty[4]={};context->PSSetShaderResources(0,4,empty);
+            context->CopyResource(inkReadback.Get(),inkTarget.Get());
+            // Submit without waiting, including when the captured desktop is
+            // static and no further swap-chain Present would submit this copy.
+            context->Flush();
+            inkPending=true;inkDirty=false;inkSubmittedAt=now;inkPendingGeneration=inkGeneration;++inkSubmissions;
+        }
+        return inkDecision.valid?int(inkDecision.white):-1;
+    }
+    static HRESULT WarmShaderBytecode() {
+        auto& cached=CachedShaders();
+        if(cached.vertex && cached.blur && cached.glass && cached.adapt && cached.ink)return S_OK;
+        Ptr<ID3DBlob> vs,ps,gs,ads,ivs,errors;
+        HRESULT result=D3DCompile(shaderSource.data(),shaderSource.size(),nullptr,nullptr,nullptr,"VS","vs_4_0",D3DCOMPILE_OPTIMIZATION_LEVEL3,0,&vs,&errors);
+        if(FAILED(result))return result;
+        result=D3DCompile(shaderSource.data(),shaderSource.size(),nullptr,nullptr,nullptr,"Blur","ps_4_0",D3DCOMPILE_OPTIMIZATION_LEVEL3,0,&ps,&errors);
+        if(FAILED(result))return result;
+        result=D3DCompile(shaderSource.data(),shaderSource.size(),nullptr,nullptr,nullptr,"Glass","ps_4_0",D3DCOMPILE_OPTIMIZATION_LEVEL3,0,&gs,&errors);
+        if(FAILED(result))return result;
+        result=D3DCompile(shaderSource.data(),shaderSource.size(),nullptr,nullptr,nullptr,"Adapt","ps_4_0",D3DCOMPILE_OPTIMIZATION_LEVEL3,0,&ads,&errors);
+        if(FAILED(result))return result;
+        result=D3DCompile(shaderSource.data(),shaderSource.size(),nullptr,nullptr,nullptr,"VSInk","vs_4_0",D3DCOMPILE_OPTIMIZATION_LEVEL3,0,&ivs,&errors);
+        if(FAILED(result))return result;
+        cached.vertex=vs;cached.blur=ps;cached.glass=gs;cached.adapt=ads;cached.ink=ivs;++cached.compilations;
+        return S_OK;
+    }
+    static unsigned ShaderCompilations() {return CachedShaders().compilations;}
+    void SetPresentationMotion(bool active) {
+        if(presentationMotion==active)return;
+        presentationMotion=active;
+        if(!active){needRender=true;RequestDraw();}
+    }
+    void SuspendForFold() {
+        // Retain the device, shaders and last rendered surface for immediate
+        // restore. Stop screen capture and wakeups while the note is hidden.
+        enabled=false;presentationMotion=false;
+        inkFrameValid=false;inkDecision.Reset();++inkGeneration;
+        adaptationAt=0;
+        if(hwnd)KillTimer(hwnd,71);
+        windowEvents.Stop();windowCapture.Close();
+        if(system.visual)system.visual->put_IsVisible(FALSE);
+        CaptureExclusion(false);
+    }
     // Approximate the tiny background hidden by independently capturable
     // controls, before both blur and sharp/refraction sampling. This preserves
     // WDA_NONE on the controls; it cannot recover exact covered desktop detail.
@@ -585,7 +810,7 @@ public:
     // Transient window presentation only; optical parameters and pixels remain unchanged.
     void SetPresentationOpacity(float value) { if(system.visual)system.visual->put_Opacity(std::clamp(value,0.0f,1.0f)); }
     void Resize(int w,int h) { system.Resize(w,h); needRender=true; RequestDraw(); }
-    void RequestDraw() {if(signal && enabled && mode>0) signal->Notify();}
+    void RequestDraw() {if(signal && enabled && mode>0 && !presentationMotion) signal->Notify();}
     void FrameReady() {
         if(!signal) return;
         const double notified=signal->notifiedAt.load(); signal->posted.store(false);
@@ -593,6 +818,8 @@ public:
         Tick();
     }
     void Changed() {
+        inkFrameValid=false;inkDecision.Reset();++inkGeneration;
+        adaptationAt=0;
         needRender=true; failed=false; retryAt=0;
         if(mode<=0) { ReleaseGpu(); KillTimer(hwnd,71); windowEvents.Stop(); CaptureExclusion(false); }
         else if(enabled) { if(!frozen) windowEvents.Start(signal); SetTimer(hwnd,71,250,nullptr); RequestDraw(); }
@@ -619,15 +846,18 @@ public:
             +L"\r\nbaseThicknessDip="+std::to_wstring(baseThickness)+L"\r\nreliefHeightDip="+std::to_wstring(reliefHeight)
             +L"\r\nreflection="+std::to_wstring(reflection)+L"\r\nopticalOnly="+std::to_wstring(opticalOnly)
             +L"\r\nfinishVersion=1\r\nedgeRoughness="+std::to_wstring(edgeRoughness)+L"\r\nenvironmentTint="+std::to_wstring(environmentTint)
+            +L"\r\nshaderCompilations="+std::to_wstring(ShaderCompilations())+L"\r\ngpuInitializations="+std::to_wstring(gpuInitializations)+L"\r\nbufferResizes="+std::to_wstring(bufferResizes)
             +L"\r\nedgeAA=coverage-radiance-4x4\r\nclipGuardPx=2"
             +L"\r\nlensMapping=profile-comparison-v1\r\ncentralMagnification=1.0"
             +L"\r\ndispersion="+std::to_wstring(dispersion)
             +L"\r\nadaptiveContrast="+std::to_wstring(adaptiveContrast)
+            +L"\r\nadaptation=local-colour-variance-v1\r\nadaptationGrid="+std::to_wstring(adaptationWidth)+L"x"+std::to_wstring(adaptationHeight)
+            +L"\r\nautoInkProbe=32x16-10Hz\r\nautoInkSubmissions="+std::to_wstring(inkSubmissions)+L"\r\nautoInkBusySkips="+std::to_wstring(inkPollMisses)
             +L"\r\nsourceAgeP95Ms="+(ageCount ? std::to_wstring(P95(sourceAges,ageCount)) : L"unavailable")+L"\r\neventDelayP95Ms="+std::to_wstring(P95(eventDelays,eventCount))
             +L"\r\nsubmitP95Ms="+std::to_wstring(P95(submitTimes,submitCount))+L"\r\ndrainedFrames="+std::to_wstring(windowCapture.drained)+L"\r\n"+windowCapture.Detail();
     }
     void Tick() {
-        if(!enabled || mode<=0 || !IsWindowVisible(hwnd) || IsIconic(hwnd)) return;
+        if(!enabled || presentationMotion || mode<=0 || !IsWindowVisible(hwnd) || IsIconic(hwnd)) return;
         // The existing idle tick also clears stale masks when the desktop has
         // stopped producing capture frames; no additional timer is introduced.
         if(previousControlOccludersUntil && GetTickCount64()>=previousControlOccludersUntil) {
