@@ -18,9 +18,25 @@ struct GlassAdaptationTest {
     Microsoft::WRL::ComPtr<ID3D11RenderTargetView> target;
     static void Check(HRESULT hr) {if(FAILED(hr))throw std::runtime_error("D3D operation failed");}
     ~GlassAdaptationTest(){g.Close();}
+    static LONG WINAPI Crash(EXCEPTION_POINTERS* error) {
+        MEMORY_BASIC_INFORMATION region{};
+        char module[MAX_PATH]{};
+        VirtualQuery(error->ExceptionRecord->ExceptionAddress,&region,sizeof(region));
+        GetModuleFileNameA(static_cast<HMODULE>(region.AllocationBase),module,MAX_PATH);
+        std::fprintf(stderr,"Unhandled exception 0x%08lX in %s + 0x%llX\n",
+            error->ExceptionRecord->ExceptionCode,module,
+            static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(error->ExceptionRecord->ExceptionAddress)-reinterpret_cast<uintptr_t>(region.AllocationBase)));
+        std::fflush(stderr);
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
+    static void Trace(const char* step) {std::fprintf(stderr,"HLSL fixture: %s\n",step);std::fflush(stderr);}
     GlassAdaptationTest(bool hardware=false) {
+        SetUnhandledExceptionFilter(Crash);
+        Trace("compile shaders");
         Check(GlassLabBackdrop::WarmShaderBytecode());
+        Trace("create device");
         Check(D3D11CreateDevice(nullptr,hardware?D3D_DRIVER_TYPE_HARDWARE:D3D_DRIVER_TYPE_WARP,nullptr,0,nullptr,0,D3D11_SDK_VERSION,&g.device,nullptr,&g.context));
+        Trace("create shaders");
         auto& s=g.CachedShaders();
         Check(g.device->CreateVertexShader(s.vertex->GetBufferPointer(),s.vertex->GetBufferSize(),nullptr,&g.vertex));
         Check(g.device->CreatePixelShader(s.glass->GetBufferPointer(),s.glass->GetBufferSize(),nullptr,&g.glassShader));
@@ -58,6 +74,7 @@ struct GlassAdaptationTest {
         g.context->UpdateSubresource(g.patch.Get(),0,nullptr,pixels.data(),(W+2*P)*sizeof(Pixel),0);
     }
     void Analyze(bool history=false,float blend=1) {
+        Trace("analyze");
         Unbind();c.finish[2]=blend;c.finish[3]=history?1.f:0.f;
         g.context->UpdateSubresource(g.constants.Get(),0,nullptr,&c,0,0);
         D3D11_VIEWPORT v{0,0,float(g.adaptationWidth),float(g.adaptationHeight),0,1};g.context->RSSetViewports(1,&v);
@@ -86,6 +103,7 @@ struct GlassAdaptationTest {
         g.context->Unmap(staging.Get(),0);return result;
     }
     std::vector<Pixel> Draw(bool adaptive=true) {
+        Trace("draw");
         Unbind();c.response[1]=adaptive?1.f:0.f;g.context->UpdateSubresource(g.constants.Get(),0,nullptr,&c,0,0);
         D3D11_VIEWPORT v{0,0,W,H,0,1};g.context->RSSetViewports(1,&v);g.context->OMSetRenderTargets(1,target.GetAddressOf(),nullptr);
         ID3D11ShaderResourceView* src[]={g.patchView.Get(),g.patchView.Get(),nullptr,g.adaptationViews[g.adaptationIndex].Get()};
@@ -99,6 +117,7 @@ struct GlassAdaptationTest {
         for(auto p:image){unsigned char b[4]={BYTE(std::clamp(p[2],0.f,1.f)*255),BYTE(std::clamp(p[1],0.f,1.f)*255),BYTE(std::clamp(p[0],0.f,1.f)*255),255};out.write(reinterpret_cast<char*>(b),4);}
     }
     void Run() {
+        Trace("white background analysis and draw");
         Background(0);Analyze();auto white=Draw();auto disabled=Draw(false);
         Require(white[(H/2)*W+W/2][0]>.999f,"white centre changed");
         Require(white[4*W+W/2][0]<.99f && white[4*W+W/2][0]>.86f,"white shoulder has no controlled headroom");

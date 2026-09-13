@@ -74,7 +74,7 @@ if ($Test -and -not $NoRun) {
         Write-Host 'ARM64 test binary built but not run on this host.'
     } else {
         & $artifact.FullName
-        if ($LASTEXITCODE -ne 0) { throw "FloatNote test failed: $baseName" }
+        if ($LASTEXITCODE -ne 0) { throw "FloatNote test failed: $baseName (exit code $LASTEXITCODE)" }
     }
 }
 
