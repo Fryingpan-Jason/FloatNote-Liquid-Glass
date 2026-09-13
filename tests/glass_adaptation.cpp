@@ -19,6 +19,7 @@ struct GlassAdaptationTest {
     static void Check(HRESULT hr) {if(FAILED(hr))throw std::runtime_error("D3D operation failed");}
     ~GlassAdaptationTest(){g.Close();}
     static LONG WINAPI Crash(EXCEPTION_POINTERS* error) {
+        if(error->ExceptionRecord->ExceptionCode!=EXCEPTION_ACCESS_VIOLATION && error->ExceptionRecord->ExceptionCode!=EXCEPTION_ILLEGAL_INSTRUCTION && error->ExceptionRecord->ExceptionCode!=EXCEPTION_STACK_OVERFLOW)return EXCEPTION_CONTINUE_SEARCH;
         MEMORY_BASIC_INFORMATION region{};
         char module[MAX_PATH]{};
         VirtualQuery(error->ExceptionRecord->ExceptionAddress,&region,sizeof(region));
@@ -31,7 +32,8 @@ struct GlassAdaptationTest {
     }
     static void Trace(const char* step) {std::fprintf(stderr,"HLSL fixture: %s\n",step);std::fflush(stderr);}
     GlassAdaptationTest(bool hardware=false) {
-        SetUnhandledExceptionFilter(Crash);
+        static void* handler=AddVectoredExceptionHandler(1,Crash);
+        (void)handler;
         Trace("compile shaders");
         Check(GlassLabBackdrop::WarmShaderBytecode());
         Trace("create device");
@@ -107,7 +109,7 @@ struct GlassAdaptationTest {
         Unbind();c.response[1]=adaptive?1.f:0.f;g.context->UpdateSubresource(g.constants.Get(),0,nullptr,&c,0,0);
         D3D11_VIEWPORT v{0,0,W,H,0,1};g.context->RSSetViewports(1,&v);g.context->OMSetRenderTargets(1,target.GetAddressOf(),nullptr);
         ID3D11ShaderResourceView* src[]={g.patchView.Get(),g.patchView.Get(),nullptr,g.adaptationViews[g.adaptationIndex].Get()};
-        g.context->PSSetShaderResources(0,4,src);g.context->PSSetShader(g.glassShader.Get(),nullptr,0);g.context->Draw(3,0);Unbind();return Read(output.Get());
+        g.context->PSSetShaderResources(0,4,src);g.context->PSSetShader(g.glassShader.Get(),nullptr,0);g.context->Draw(3,0);Trace("draw submitted; readback");Unbind();return Read(output.Get());
     }
     static void Require(bool value,const char* message) {if(!value)throw std::runtime_error(message);}
     static void Save(const char* name,const std::vector<Pixel>& image) {
