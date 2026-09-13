@@ -6,7 +6,7 @@ English · [简体中文](README.md)
 
 ![FloatNote on the desktop](docs/media/desktop.webp)
 
-> Recorded from a local development build. Some visual and interaction improvements are not yet included in the v2.0.0 download.
+> Recorded from a local development build. The visual and interaction improvements shown are included in v2.1.0.
 
 **[Download the latest release](https://github.com/Fryingpan-Jason/FloatNote-Liquid-Glass/releases/latest)** · [Liquid Glass implementation](docs/WINDOWS_LIQUID_GLASS.md)
 
@@ -48,7 +48,7 @@ Choose an application ZIP, not **Source code**. Extract into a writable folder. 
 
 Liquid glass targets supported Windows 11 environments, with fallback where needed. Some screenshot, recording and remote-sharing methods may omit the live glass note; switch to frosted glass when necessary. See [compatibility](docs/COMPATIBILITY.md).
 
-The new v2.0.0 settings panel, close prompt and material controls are currently in Chinese. Screen pixels are processed locally on the GPU, never uploaded.
+The settings panel, close prompt and material controls are currently in Chinese. Screen pixels are processed locally on the GPU, never uploaded.
 
 ## Development
 

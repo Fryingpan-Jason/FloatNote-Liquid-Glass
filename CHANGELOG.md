@@ -2,6 +2,26 @@
 
 All notable changes are documented here. FloatNote follows [Semantic Versioning](https://semver.org/).
 
+## [2.1.0] - 2026-09-13
+
+### Added
+
+- Automatic liquid-glass text color based on the rendered background, with smooth transitions and protection against rapid switching.
+- Monochrome controls that adapt to the surrounding background, retaining red feedback when hovering over close.
+- Local background analysis for glass shoulder lighting and reflections.
+
+### Improved
+
+- Reuse shaders and graphics resources across collapse/restore transitions; reveal controls more promptly.
+- Keep independent controls above the note without a window-count limit.
+- Match the resize hint to the note text color and its transition.
+- Add product screenshots and short demonstrations to the bilingual README.
+
+### Limits
+
+- Live glass may remain absent from some screen-capture and remote-sharing methods; use frosted glass when necessary.
+- Settings and material controls remain in Chinese.
+
 ## [2.0.0] - 2026-09-11
 
 ### Added

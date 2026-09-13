@@ -6,7 +6,7 @@
 
 ![FloatNote 桌面效果](docs/media/desktop.webp)
 
-> 展示素材录自本地开发版，部分视觉与交互改进尚未包含在 v2.0.0 下载版中。
+> 展示素材录自本地开发版，所示视觉与交互改进已包含在 v2.1.0 中。
 
 **[下载最新版](https://github.com/Fryingpan-Jason/FloatNote-Liquid-Glass/releases/latest)** · [液态玻璃实现说明](docs/WINDOWS_LIQUID_GLASS.md)
 
@@ -48,7 +48,7 @@
 
 液态玻璃主要面向支持相应系统接口的 Windows 11；不支持的环境会降级。部分截图、录屏和远程共享方式可能看不到实时玻璃便签，需要时切换毛玻璃。详见[兼容性说明](docs/COMPATIBILITY.zh-CN.md)。
 
-v2.0.0 新增设置面板、关闭确认和材质参数目前为中文。屏幕背景仅在本机 GPU 上处理，不上传。
+设置面板、关闭确认和材质参数目前为中文。屏幕背景仅在本机 GPU 上处理，不上传。
 
 ## 开发
 
