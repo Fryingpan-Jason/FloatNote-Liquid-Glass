@@ -2,52 +2,59 @@
 
 English · [简体中文](README.md)
 
-**A native Windows Liquid Glass implementation and a ready-to-run floating-note app.** FloatNote 2.0 uses C++/Win32, Direct3D 11, HLSL and Windows Graphics Capture for edge refraction, background-responsive reflections and spring animations. The implementation is MIT licensed.
+**A native Windows floating note with Liquid Glass.** Live refraction, spring animations, always-on-top and mouse click-through. Notes and preferences stay local. No accounts or telemetry.
 
-**Building Liquid Glass for your own Windows app?** Start with [Implement Liquid Glass on Windows](docs/WINDOWS_LIQUID_GLASS.md): source entry points, rendering pipeline, reuse boundaries and Windows capture limitations. This is implementation reference inside a complete application, not a standalone SDK.
+![FloatNote on the desktop](docs/media/desktop.webp)
 
-The app also offers frosted and solid backgrounds. Text uses the native Windows editor, with selection, IME input and undo. Notes and preferences stay local.
+> Recorded from a local development build. Some visual and interaction improvements are not yet included in the v2.0.0 download.
 
-## Download an app, not source code
+**[Download the latest release](https://github.com/Fryingpan-Jason/FloatNote-Liquid-Glass/releases/latest)** · [Liquid Glass implementation](docs/WINDOWS_LIQUID_GLASS.md)
 
-**[Download the latest portable release](https://github.com/Fryingpan-Jason/FloatNote-Liquid-Glass/releases/latest)**, extract the ZIP, and run `FloatNote.exe`. No compiler, development tools or additional runtime installation is required.
+## See it in action
 
-| File | Choose for |
-| --- | --- |
-| `FloatNote-2.0.0-windows-x64.zip` | Most Intel/AMD 64-bit PCs; recommended default |
-| `FloatNote-2.0.0-windows-arm64.zip` | Windows on ARM, including Snapdragon X devices |
-| `FloatNote-2.0.0-windows-x86.zip` | 32-bit environments or a required 32-bit process |
+Drag the note to see background refraction and text changes.
 
-The **Source code** links on GitHub are for developers, not ready-to-run applications. Extract into a writable folder, rather than `Program Files`. Binaries are unsigned; Windows may show a SmartScreen prompt. Compare the downloaded ZIP with `SHA256SUMS.txt` on the release page if needed.
+![Dragging and refraction](docs/media/refraction.gif)
 
-## What's new
+Shrink the note vertically into a compact bar; click to restore. This GIF plays at approximately 1.43× speed.
 
-- Liquid glass with continuous edge refraction, background-responsive reflections, edge softness and adjustable dispersion. Frosted and solid modes remain available.
-- A compact top control expands into settings and close actions when approached, then retracts when you leave.
-- Shrink the note vertically to tuck it into a small status bar; click to restore. Absorption, restoration and arrival bounce share continuous geometry.
-- Pinning, mouse click-through, preset/custom background and text colors, font size and blur controls.
-- Choose between hiding to the tray and exiting when closing, and optionally remember the choice.
-- Single-instance behavior, startup integration and global recovery shortcuts.
+![Collapse and restore](docs/media/collapse-restore.gif)
 
-## Use and upgrade
+<details>
+<summary>Appearance settings</summary>
 
-- Hover near the top hint to reveal settings; drag the bottom-right grip to resize.
-- `Ctrl+Alt+E`: show and restore editing. `Ctrl+Alt+H`: toggle visibility. `Ctrl+Alt+P`: toggle mouse click-through.
-- Double-click the tray icon or run the app again to recover your note.
-- `Ctrl+wheel`, `Ctrl++` and `Ctrl+-` change font size.
-- To upgrade from 1.x, exit the old app and replace `FloatNote.exe` in the same folder. **Keep the existing `data` folder**, and back it up first if you want an easy rollback.
+Liquid glass, frosted glass or solid backgrounds, with color, font size, blur, pinning and click-through controls.
 
-Archives contain no note data or personal settings. The app creates `data/note.txt`, `settings.ini`, `material.ini` and `experience.ini` locally. It has no accounts, telemetry or network client. Screen pixels used for glass are processed locally through Windows APIs and the GPU, never uploaded.
+![Appearance settings](docs/media/settings.webp)
 
-## Platform and language limits
+</details>
 
-Liquid glass is intended for supported Windows 11 capture/composition environments. Accessibility, power, remote-session and API limitations can trigger fallback; see [compatibility](docs/COMPATIBILITY.md). The live liquid-glass note can be absent from screenshots or third-party remote streams; choose frosted glass when capture visibility matters. The top control is drawn independently as a recovery route.
+## Download and use
 
-**The new 2.0 settings panel, close prompt and material controls are currently in Chinese.** Existing tray and basic UI language options remain available. A complete English translation of the new panel is not claimed for this release.
+Choose a portable ZIP on the release page, extract it, and run `FloatNote.exe`. No additional runtime installation is required.
 
-## Build
+- **x64**: most Intel / AMD PCs.
+- **arm64**: Windows on ARM devices.
+- **x86**: 32-bit environments.
 
-With Visual Studio C++ tools and a Windows SDK, the default build produces the 2.0 desktop app:
+Choose an application ZIP, not **Source code**. Extract into a writable folder. Binaries are unsigned and may trigger SmartScreen; SHA-256 checksums are included on the release page.
+
+- Hover near the top to reveal controls; drag the bottom-right grip to resize.
+- `Ctrl+Alt+E` restores editing; `Ctrl+Alt+H` toggles visibility; `Ctrl+Alt+P` toggles click-through.
+- `Ctrl+wheel` changes font size. Double-click the tray icon to recover the note.
+- To upgrade, exit the old app and replace the executable. **Keep and back up the existing `data` folder.**
+
+## Compatibility
+
+Liquid glass targets supported Windows 11 environments, with fallback where needed. Some screenshot, recording and remote-sharing methods may omit the live glass note; switch to frosted glass when necessary. See [compatibility](docs/COMPATIBILITY.md).
+
+The new v2.0.0 settings panel, close prompt and material controls are currently in Chinese. Screen pixels are processed locally on the GPU, never uploaded.
+
+## Development
+
+Built with C++/Win32, Direct3D 11, HLSL and Windows Graphics Capture under the MIT license. Explore the [Liquid Glass implementation](docs/WINDOWS_LIQUID_GLASS.md); this is not a standalone SDK.
+
+With Visual Studio C++ tools and a Windows SDK:
 
 ```powershell
 .\build.ps1 -Architecture x64 -OutputDirectory build\x64
@@ -55,4 +62,4 @@ With Visual Studio C++ tools and a Windows SDK, the default build produces the 2
 .\scripts\package.ps1 -Architecture x64
 ```
 
-See [development](docs/DEVELOPMENT.md). MIT licensed; adapted material code is credited in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+[Development guide](docs/DEVELOPMENT.md) · [Third-party notices](THIRD_PARTY_NOTICES.md)
