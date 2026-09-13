@@ -19,6 +19,8 @@ struct GlassAdaptationTest {
     static void Check(HRESULT hr) {if(FAILED(hr))throw std::runtime_error("D3D operation failed");}
     ~GlassAdaptationTest(){g.Close();}
     static LONG WINAPI Crash(EXCEPTION_POINTERS* error) {
+        static volatile LONG reports=0;
+        if(InterlockedIncrement(&reports)>4)return EXCEPTION_CONTINUE_SEARCH;
         if(error->ExceptionRecord->ExceptionCode!=EXCEPTION_ACCESS_VIOLATION && error->ExceptionRecord->ExceptionCode!=EXCEPTION_ILLEGAL_INSTRUCTION && error->ExceptionRecord->ExceptionCode!=EXCEPTION_STACK_OVERFLOW)return EXCEPTION_CONTINUE_SEARCH;
         MEMORY_BASIC_INFORMATION region{};
         char module[MAX_PATH]{};
@@ -36,6 +38,15 @@ struct GlassAdaptationTest {
         (void)handler;
         Trace("compile shaders");
         Check(GlassLabBackdrop::WarmShaderBytecode());
+        // CI can pin Microsoft's standalone WARP for offscreen shader tests.
+        // The production renderer never loads this test-only dependency.
+        wchar_t warpPath[MAX_PATH]{};
+        const DWORD pathLength=GetEnvironmentVariableW(L"FLOATNOTE_TEST_WARP",warpPath,MAX_PATH);
+        if(pathLength) {
+            if(pathLength>=MAX_PATH || !LoadLibraryExW(warpPath,nullptr,LOAD_WITH_ALTERED_SEARCH_PATH))
+                throw std::runtime_error("Could not load pinned test WARP");
+            std::fwprintf(stderr,L"Test WARP: %ls\n",warpPath);
+        }
         Trace("create device");
         Check(D3D11CreateDevice(nullptr,hardware?D3D_DRIVER_TYPE_HARDWARE:D3D_DRIVER_TYPE_WARP,nullptr,0,nullptr,0,D3D11_SDK_VERSION,&g.device,nullptr,&g.context));
         Trace("create shaders");

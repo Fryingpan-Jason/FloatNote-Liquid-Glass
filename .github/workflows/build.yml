@@ -30,6 +30,18 @@ jobs:
       - name: Build application
         shell: pwsh
         run: .\build.ps1 -Architecture '${{ matrix.arch }}' -OutputDirectory 'out\${{ matrix.arch }}'
+      - name: Pin ARM64 offscreen test rasterizer
+        if: matrix.arch == 'arm64'
+        shell: pwsh
+        run: |
+          $version = '1.0.20'
+          New-Item -ItemType Directory -Force out/test-warp | Out-Null
+          Invoke-WebRequest "https://api.nuget.org/v3-flatcontainer/microsoft.direct3d.warp/$version/microsoft.direct3d.warp.$version.nupkg" -OutFile out/test-warp/package.zip
+          Expand-Archive out/test-warp/package.zip out/test-warp/package
+          $dll = Get-ChildItem out/test-warp/package -Recurse -Filter d3d10warp.dll | Where-Object { $_.Directory.Name -eq 'arm64' }
+          if (@($dll).Count -ne 1) { throw 'Expected one ARM64 test WARP binary.' }
+          "FLOATNOTE_TEST_WARP=$($dll.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          $dll.VersionInfo | Select-Object FileName,FileVersion
       - name: Run native and glass regression
         shell: pwsh
         run: |

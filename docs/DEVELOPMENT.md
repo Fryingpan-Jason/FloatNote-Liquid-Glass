@@ -65,3 +65,5 @@ Package staging uses a fixed file allowlist: EXE, bilingual README, quick start,
 - Apply transparency only to the background; text must remain legible.
 - Treat glass as optional. Editing must work when composition, transparency effects, or the backdrop API is unavailable.
 - Avoid polling and animation loops while the note is idle.
+
+ARM64 CI pins Microsoft.Direct3D.WARP 1.0.20 for offscreen HLSL tests because the runner's system WARP crashes during this fixture. FLOATNOTE_TEST_WARP selects that test-only DLL. Application builds and release archives continue to use Windows system components only; the pinned test DLL is never packaged.
