@@ -316,8 +316,8 @@ int main() {
         SendMessageW(g_edit, EM_GETSEL, reinterpret_cast<WPARAM>(&selectionStart),
                      reinterpret_cast<LPARAM>(&selectionEnd));
         GetWindowRect(g_window, &moved);
-        Check(EqualRect(&originalBounds, &moved) && selectionStart == 5 && selectionEnd == 5,
-              "clicking blank line space positions the caret; only dragging moves the note");
+        Check(EqualRect(&originalBounds, &moved) && !g_markdownEditing && EditorText()==L"hello\r\nnext",
+              "clicking blank line space returns to preview; only dragging moves the note");
 
         std::wstring largeNote;
         for (int line = 0; line < 4500; ++line)

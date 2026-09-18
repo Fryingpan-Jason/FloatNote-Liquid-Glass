@@ -206,6 +206,7 @@ HRESULT CALLBACK ExperienceCloseDialogProcedure(HWND window,UINT message,WPARAM,
 }
 void RequestExperienceClose() {
     if(!experienceReady || g_closing || experienceCloseDialogOpen || experienceColorDialogOpen || experienceColorRequestPending)return;
+    LeaveMarkdownEditor();
     experiencePanel.Close(false);
     auto decision=GlassClose::Resolve(experienceCloseBehavior,GlassClose::Behavior::Ask,false,false);
     if(experienceCloseBehavior==GlassClose::Behavior::Ask) {
@@ -401,6 +402,7 @@ void TickExperienceAbsorb() {
 void CloseExperienceMenu() {if(experienceReady)experiencePanel.Close();}
 void ToggleExperienceMenu() {
     if(ExperienceInputBlocked() || experienceCloseDialogOpen || experienceColorDialogOpen || experienceColorRequestPending)return;
+    LeaveMarkdownEditor();
     if(!experienceReady)CreateExperienceUI();
     if(!experienceReady)return;
     if(experienceFolded){ExpandExperienceNote();return;}
@@ -417,6 +419,7 @@ void ToggleExperienceMenu() {
     SyncExperienceUI();
 }
 void ExperienceAction(GlassControlPopover::Action action,int value) {
+    LeaveMarkdownEditor();
     using A=GlassControlPopover::Action;
     switch(action){
     case A::ToggleTopmost:SetTopmost(!ExperienceState().pinned);break;
@@ -483,7 +486,7 @@ void CreateExperienceUI() {
     experienceIsland.Create(g_instance,[]{ToggleExperienceMenu();},[](int,int){
         if(experienceDragging){experienceDragging=false;RecoverWindowPosition();SaveSettings();SyncExperienceUI();}
     },[](int dx,int dy){
-        if(!experienceDragging){GetWindowRect(g_window,&experienceDragOrigin);experienceDragging=true;CloseExperienceMenu();}
+        if(!experienceDragging){LeaveMarkdownEditor();GetWindowRect(g_window,&experienceDragOrigin);experienceDragging=true;CloseExperienceMenu();}
         SetWindowPos(g_window,nullptr,experienceDragOrigin.left+dx,experienceDragOrigin.top+dy,0,0,
             SWP_NOSIZE|SWP_NOZORDER|SWP_NOACTIVATE);
     },[]{PostMessageW(g_window,kExperienceCloseRequest,0,0);});

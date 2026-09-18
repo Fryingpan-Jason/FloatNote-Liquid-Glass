@@ -40,6 +40,7 @@ Choose a portable ZIP on the release page, extract it, and run `FloatNote.exe`. 
 Choose an application ZIP, not **Source code**. Extract into a writable folder. Binaries are unsigned and may trigger SmartScreen; SHA-256 checksums are included on the release page.
 
 - Hover near the top to reveal controls; drag the bottom-right grip to resize.
+- Notes start in Markdown preview. Click text to edit; click blank space, a control or another window to save and return to preview. See [Quick start](docs/QUICKSTART.md) for supported syntax.
 - `Ctrl+Alt+E` restores editing; `Ctrl+Alt+H` toggles visibility; `Ctrl+Alt+P` toggles click-through.
 - `Ctrl+wheel` changes font size. Double-click the tray icon to recover the note.
 - To upgrade, exit the old app and replace the executable. **Keep and back up the existing `data` folder.**

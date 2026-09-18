@@ -24,6 +24,7 @@
 #endif
 #include "localization.h"
 #include "version.h"
+#include "markdown_preview.h"
 
 namespace {
 
@@ -74,6 +75,7 @@ constexpr int kMinimumNoteWidth=180,kMinimumNoteHeight=90;
 constexpr UINT kTrayMessage = WM_APP + 1;
 constexpr UINT kShowEditMessage = WM_APP + 2;
 constexpr UINT kRenderMessage = WM_APP + 3;
+constexpr UINT kMarkdownPreviewMessage = WM_APP + 4;
 constexpr UINT_PTR kCaretTimer = 3;
 constexpr UINT_PTR kSaveTimer = 1;
 constexpr UINT kHotkeyToggleMode = 1;
@@ -239,6 +241,9 @@ unsigned long long g_renderCount = 0;
 std::wstring g_glassStatus;
 std::wstring g_hitText;
 bool g_hitTextDirty = true;
+Markdown::Preview g_markdownPreview;
+bool g_markdownEditing = false, g_markdownDirty = true;
+bool g_markdownComposing = false, g_markdownBlurPending = false;
 void RequestRender();
 void RenderLayeredWindow();
 void RefreshTheme();
@@ -402,6 +407,21 @@ std::wstring EditorText() {
     GetWindowTextW(g_edit, text.data(), length + 1);
     text.resize(static_cast<size_t>(length));
     return text;
+}
+
+bool EnsureMarkdownPreview() {
+    RECT bounds{};GetClientRect(g_edit,&bounds);
+    const float size=static_cast<float>(MulDiv(g_settings.fontSize,GetDpiForWindow(g_edit),72));
+    if(!g_markdownDirty && g_markdownPreview.Matches(bounds.right,bounds.bottom,size))return true;
+    if(!g_markdownPreview.Build(EditorText(),bounds.right,bounds.bottom,size))return false;
+    g_markdownDirty=false;return true;
+}
+
+bool PaintMarkdownPreview(HDC dc) {
+    if(!EnsureMarkdownPreview())return false;
+    RECT bounds{};GetClientRect(g_edit,&bounds);
+    return g_markdownPreview.Paint(dc,bounds,g_textMask?RGB(255,255,255):kNoteText,
+        g_textMask?(g_textMask==1?RGB(0,0,0):RGB(255,255,255)):kBackground);
 }
 
 std::wstring NormalizeNewlines(const std::wstring& input) {
@@ -759,6 +779,36 @@ void SavePendingNote() {
     RequestRender();
 }
 
+void BeginMarkdownEditing(size_t source=std::wstring::npos) {
+    if(g_loadFailed || g_settings.passThrough)return;
+    g_markdownEditing=true;g_markdownBlurPending=false;
+    SetFocus(g_edit);
+    if(source!=std::wstring::npos) {
+        const auto caret=static_cast<WPARAM>(std::min(source,size_t(GetWindowTextLengthW(g_edit))));
+        SendMessageW(g_edit,EM_SETSEL,caret,caret);
+        SendMessageW(g_edit,EM_SCROLLCARET,0,0);
+    }
+    InvalidateRect(g_edit,nullptr,FALSE);ResetCaret();
+}
+
+void FinishMarkdownEditing() {
+    if(!g_markdownEditing)return;
+    if(g_markdownComposing){g_markdownBlurPending=true;return;}
+    const auto line=SendMessageW(g_edit,EM_GETFIRSTVISIBLELINE,0,0);
+    const auto source=SendMessageW(g_edit,EM_LINEINDEX,line,0);
+    g_markdownEditing=false;g_markdownBlurPending=false;g_caretVisible=false;
+    KillTimer(g_window,kCaretTimer);
+    if(EnsureMarkdownPreview() && source>=0)g_markdownPreview.ScrollToSource(static_cast<size_t>(source));
+    SavePendingNote();InvalidateRect(g_edit,nullptr,FALSE);RequestRender();
+}
+
+void LeaveMarkdownEditor() {
+    // Native focus handling commits/cancels IME composition before we display
+    // the preview. No source text is replaced, so native undo survives.
+    if(GetFocus()==g_edit)SetFocus(g_window);
+    FinishMarkdownEditing();
+}
+
 void ApplyInteractionMode(bool = false) {
     if (!g_window || g_closing)
         return;
@@ -807,8 +857,7 @@ void EnterEditor() {
     ShowWindow(g_window, SW_SHOWNORMAL);
     ApplyInteractionMode();
     SetForegroundWindow(g_window);
-    SetFocus(g_edit);
-    ResetCaret();
+    BeginMarkdownEditing();
 }
 
 void SetPassThrough(bool enabled) {
@@ -824,6 +873,7 @@ void SetPassThrough(bool enabled) {
     g_settings.passThrough = enabled;
     if (enabled) {
         SetFocus(nullptr);
+        FinishMarkdownEditing();
         KillTimer(g_window, kCaretTimer);
     }
     ApplyInteractionMode();
@@ -1814,6 +1864,7 @@ LRESULT CALLBACK PointerProcedure(HWND window, UINT message, WPARAM wp, LPARAM l
         return TRUE;
     }
     if (message == WM_LBUTTONDOWN) {
+        LeaveMarkdownEditor();
 #ifdef FLOATNOTE_GLASS_LAB
         if(id==kControlGrip)BeginExperienceResize();
 #endif
@@ -1867,12 +1918,6 @@ LRESULT CALLBACK PointerProcedure(HWND window, UINT message, WPARAM wp, LPARAM l
             SaveSettings();
         } else if (id == kControlPill)
             PostMessageW(g_window, WM_COMMAND, kControlPill, 0);
-        else if (window == g_edit) {
-            SetFocus(g_edit);
-            DefSubclassProc(window, WM_LBUTTONDOWN, MK_LBUTTON, lp);
-            DefSubclassProc(window, WM_LBUTTONUP, 0, lp);
-            ResetCaret();
-        }
         return 0;
     }
     if (message == WM_CAPTURECHANGED) {
@@ -1930,11 +1975,57 @@ bool IsTextPoint(HWND window, POINT point) {
 }
 
 LRESULT CALLBACK EditProcedure(HWND window, UINT message, WPARAM wParam, LPARAM lParam, UINT_PTR, DWORD_PTR) {
+    if(message==WM_IME_STARTCOMPOSITION)g_markdownComposing=true;
+    if(message==WM_IME_ENDCOMPOSITION) {
+        const auto result=DefSubclassProc(window,message,wParam,lParam);
+        g_markdownComposing=false;
+        if(g_markdownBlurPending)PostMessageW(g_window,kMarkdownPreviewMessage,0,0);
+        RequestRender();return result;
+    }
     if (message == WM_SETFOCUS)
         ResetCaret();
     if (message == WM_KILLFOCUS) {
         KillTimer(g_window, kCaretTimer);
+        g_markdownBlurPending=true;
+        PostMessageW(g_window,kMarkdownPreviewMessage,0,0);
         RequestRender();
+    }
+    if(message==WM_SETTEXT)g_markdownDirty=true;
+    if(!g_markdownEditing) {
+        if((message==WM_PRINT || message==WM_PRINTCLIENT) && PaintMarkdownPreview(reinterpret_cast<HDC>(wParam)))return 0;
+        if(message==WM_PAINT) {
+            PAINTSTRUCT paint{};HDC dc=BeginPaint(window,&paint);
+            const bool painted=PaintMarkdownPreview(dc);
+            if(!painted)DefSubclassProc(window,WM_PRINTCLIENT,reinterpret_cast<WPARAM>(dc),PRF_CLIENT|PRF_ERASEBKGND);
+            EndPaint(window,&paint);RequestRender();return 0;
+        }
+        if(message==WM_LBUTTONDOWN || message==WM_LBUTTONDBLCLK) {
+            size_t source=0;
+            if(EnsureMarkdownPreview() && g_markdownPreview.Hit({GET_X_LPARAM(lParam),GET_Y_LPARAM(lParam)},source)) {
+                BeginMarkdownEditing(source);return 0;
+            }
+            if(!EnsureMarkdownPreview() && IsTextPoint(window,{GET_X_LPARAM(lParam),GET_Y_LPARAM(lParam)}))
+                BeginMarkdownEditing();
+            else return PointerProcedure(window,WM_LBUTTONDOWN,wParam,lParam,0,0);
+        }
+        if(message==WM_SETCURSOR) {
+            POINT point{};GetCursorPos(&point);ScreenToClient(window,&point);size_t source=0;
+            const bool hit=EnsureMarkdownPreview()?g_markdownPreview.Hit(point,source):IsTextPoint(window,point);
+            SetCursor(LoadCursorW(nullptr,hit?IDC_IBEAM:IDC_HAND));return TRUE;
+        }
+        if(message==WM_MOUSEWHEEL && !(GET_KEYSTATE_WPARAM(wParam)&MK_CONTROL) && EnsureMarkdownPreview()) {
+            g_scrollRemainder+=GET_WHEEL_DELTA_WPARAM(wParam);
+            const int steps=g_scrollRemainder/WHEEL_DELTA;g_scrollRemainder%=WHEEL_DELTA;
+            UINT lines=3;SystemParametersInfoW(SPI_GETWHEELSCROLLLINES,0,&lines,0);
+            RECT bounds{};GetClientRect(window,&bounds);
+            const float amount=lines==WHEEL_PAGESCROLL?static_cast<float>(bounds.bottom):
+                lines*MulDiv(g_settings.fontSize,GetDpiForWindow(window),72)*1.4f;
+            g_markdownPreview.Scroll(-steps*amount);InvalidateRect(window,nullptr,FALSE);RequestRender();return 0;
+        }
+        // Keyboard activation is available to keyboard/accessibility users;
+        // focusing the window alone must not turn a preview into an editor.
+        if(message==WM_KEYDOWN && wParam==VK_F2) {BeginMarkdownEditing();return 0;}
+        if(message==WM_CHAR || message==WM_KEYDOWN || message==WM_CUT || message==WM_PASTE || message==WM_CLEAR)return 0;
     }
     if ((message == WM_LBUTTONDOWN || message == WM_LBUTTONDBLCLK) &&
         !IsTextPoint(window, {GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)}))
@@ -2285,7 +2376,7 @@ void DrawCompositedDecorations(RECT outer) {
 
 void ResetCaret() {
     g_caretVisible = true;
-    if (g_window && GetFocus() == g_edit && !g_settings.passThrough && !g_loadFailed) {
+    if (g_markdownEditing && g_window && GetFocus() == g_edit && !g_settings.passThrough && !g_loadFailed) {
         const UINT blink = GetCaretBlinkTime();
         KillTimer(g_window, kCaretTimer);
         if (blink != INFINITE && blink != 0)
@@ -2401,7 +2492,7 @@ void RenderLayeredWindow() {
         }
     }
     DrawCompositedDecorations(outer);
-    if (editorVisible && g_caretVisible && GetFocus() == g_edit && !g_settings.passThrough && !g_loadFailed) {
+    if (g_markdownEditing && editorVisible && g_caretVisible && GetFocus() == g_edit && !g_settings.passThrough && !g_loadFailed) {
         DWORD start = 0, end = 0;
         SendMessageW(g_edit, EM_GETSEL, reinterpret_cast<WPARAM>(&start), reinterpret_cast<LPARAM>(&end));
         GUITHREADINFO info{sizeof(info)};
@@ -2487,8 +2578,13 @@ LRESULT CALLBACK WindowProcedure(HWND window, UINT message, WPARAM wParam, LPARA
     case kRenderMessage:
         RenderLayeredWindow();
         return 0;
+    case kMarkdownPreviewMessage:
+        if(g_markdownBlurPending && (GetFocus()!=g_edit || GetForegroundWindow()!=g_window))FinishMarkdownEditing();
+        return 0;
     case WM_ACTIVATE:
         if (LOWORD(wParam) == WA_INACTIVE) {
+            g_markdownBlurPending=true;
+            PostMessageW(window,kMarkdownPreviewMessage,0,0);
             KillTimer(window, kCaretTimer);
             g_caretVisible = false;
         } else if (!g_settings.passThrough)
@@ -2582,6 +2678,7 @@ LRESULT CALLBACK WindowProcedure(HWND window, UINT message, WPARAM wParam, LPARA
     case WM_COMMAND: {
         const int id = LOWORD(wParam);
         if (id == kControlEdit && HIWORD(wParam) == EN_CHANGE && !g_loadingText) {
+            g_markdownDirty=true;
             g_hitTextDirty = true;
             g_dirty = true;
             g_saveFailed = false;
@@ -2607,7 +2704,7 @@ LRESULT CALLBACK WindowProcedure(HWND window, UINT message, WPARAM wParam, LPARA
             KillTimer(window, 2);
             SaveSettings();
         } else if (wParam == kCaretTimer) {
-            if (GetFocus() != g_edit || GetForegroundWindow() != g_window || !g_isVisible || g_settings.passThrough)
+            if (!g_markdownEditing || GetFocus() != g_edit || GetForegroundWindow() != g_window || !g_isVisible || g_settings.passThrough)
                 KillTimer(window, kCaretTimer);
             else {
                 g_caretVisible = !g_caretVisible;

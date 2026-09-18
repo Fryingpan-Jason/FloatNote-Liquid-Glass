@@ -12,11 +12,13 @@ For the liquid-glass renderer, source map and adaptation boundaries, start with 
 - `src/liquid_backdrop.h` and `monitor_backdrop_capture.h` — local GPU material and monitor capture.
 
 - `src/main.cpp` — Win32 window, input, persistence, tray, and rendering behavior.
+- `src/markdown.h` / `src/markdown_preview.h` — local Markdown parsing, source-position mapping and DirectWrite/Direct2D preview; native EDIT retains input, IME and undo.
 - `src/backdrop.h` — isolated Windows Composition host-backdrop integration.
 - `src/platform.h` — small Windows helpers and atomic file writes.
 - `src/localization.h` — English and Simplified Chinese strings.
 - `src/version.h` / `src/resources.rc` — the single product version and executable metadata.
 - `tests/regression.cpp` — hidden, deterministic native behavior checks.
+- `tests/glass_markdown.cpp` — automatic preview/edit switching, source persistence, undo, IME lifecycle, wrapping and transparent text composition with isolated data.
 - `tests/integration.cpp` — focused compositor and interaction checks that open temporary windows.
 - `tests/visuals.cpp` — shadow, tint, text antialiasing, custom text color, and settings screenshot checks.
 - `tests/visual_test_support.h` — shared fixtures and compositor capture helpers.
