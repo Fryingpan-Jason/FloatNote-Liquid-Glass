@@ -193,8 +193,9 @@ int main() {
                 "small settings viewport scrolls focused controls fully into view");
         CaptureWindow(g_menu, g_dataDirectory / L"08-compact-settings.png");
         PostMessageW(g_slider, WM_KEYDOWN, VK_ESCAPE, 0);
-        PumpFor(60);
+        PumpFor(280);
         Require(!IsWindowVisible(g_menu) && IsWindow(g_window), "Escape closes settings without closing the note");
+        BeginMarkdownEditing();
         const auto originalText = EditorText();
         SendMessageW(g_edit, EM_SETSEL, 0, -1);
         SendMessageW(g_edit, EM_REPLACESEL, TRUE, reinterpret_cast<LPARAM>(L"中文输入与撤销 😀"));

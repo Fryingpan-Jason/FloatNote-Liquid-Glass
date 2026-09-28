@@ -107,6 +107,23 @@ int main() {
         SendMessageW(g_window,WM_LBUTTONUP,0,MAKELPARAM(3,3));GetWindowRect(g_window,&after);
         Check(!g_markdownEditing && EqualRect(&before,&after) && EditorText()==source,"blank clicks leave editing without moving the note or changing text");
         BeginMarkdownEditing();
+        const auto space=source.find(L' ');
+        const LRESULT spacePos=SendMessageW(g_edit,EM_POSFROMCHAR,static_cast<WPARAM>(space),0);
+        RECT editingBounds{};GetWindowRect(g_window,&editingBounds);
+        SendMessageW(g_edit,WM_LBUTTONDOWN,MK_LBUTTON,MAKELPARAM(GET_X_LPARAM(spacePos)+1,GET_Y_LPARAM(spacePos)+2));
+        SendMessageW(g_edit,WM_LBUTTONUP,0,MAKELPARAM(GET_X_LPARAM(spacePos)+1,GET_Y_LPARAM(spacePos)+2));
+        RECT afterSpace{};GetWindowRect(g_window,&afterSpace);
+        Check(space!=std::wstring::npos && g_markdownEditing && !g_pointerDown && EqualRect(&editingBounds,&afterSpace),
+              "clicking a space while editing does not drag the note");
+        RECT editorClient{};GetClientRect(g_edit,&editorClient);
+        const LRESULT linePos=SendMessageW(g_edit,EM_POSFROMCHAR,0,0);
+        const POINT lineEnd{editorClient.right-3,GET_Y_LPARAM(linePos)+2};
+        SendMessageW(g_edit,WM_LBUTTONDOWN,MK_LBUTTON,MAKELPARAM(lineEnd.x,lineEnd.y));
+        SendMessageW(g_edit,WM_LBUTTONUP,0,MAKELPARAM(lineEnd.x,lineEnd.y));
+        GetWindowRect(g_window,&afterSpace);
+        Check(g_markdownEditing && !g_pointerDown && EqualRect(&editingBounds,&afterSpace),
+              "clicking a line end while editing does not drag the note");
+        BeginMarkdownEditing();
         SendMessageW(g_grip,WM_LBUTTONDOWN,MK_LBUTTON,MAKELPARAM(3,3));
         SendMessageW(g_grip,WM_LBUTTONUP,0,MAKELPARAM(3,3));
         Check(!g_markdownEditing,"resize grip clicks return to preview");

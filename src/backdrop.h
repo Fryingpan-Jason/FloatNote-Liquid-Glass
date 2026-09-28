@@ -7,6 +7,7 @@
 #include <windows.ui.composition.desktop.h>
 #include <windows.ui.composition.interop.h>
 #include <DispatcherQueue.h>
+#include <algorithm>
 #include <memory>
 #include <utility>
 #pragma comment(lib, "runtimeobject.lib")
@@ -108,6 +109,10 @@ struct NativeBackdrop {
         GetClientRect(window, &rect);
         visual->put_Size({static_cast<float>(rect.right), static_cast<float>(rect.bottom)});
         return SUCCEEDED(error = visual->put_IsVisible(TRUE));
+    }
+    void SetOpacity(float opacity) {
+        if (visual)
+            visual->put_Opacity(std::clamp(opacity, 0.0f, 1.0f));
     }
     void Resize(int width, int height) {
         if (visual)

@@ -78,6 +78,8 @@ constexpr UINT kRenderMessage = WM_APP + 3;
 constexpr UINT kMarkdownPreviewMessage = WM_APP + 4;
 constexpr UINT_PTR kCaretTimer = 3;
 constexpr UINT_PTR kSaveTimer = 1;
+constexpr UINT_PTR kPillHoverTimer = 4;
+constexpr UINT_PTR kMenuFadeTimer = 5;
 constexpr UINT kHotkeyToggleMode = 1;
 constexpr UINT kHotkeyToggleVisibility = 2;
 constexpr UINT kHotkeyPassThrough = 3;
@@ -152,6 +154,12 @@ int g_menuScroll = 0;
 int g_menuWheel = 0;
 int g_menuLayoutMode = -1;
 bool g_pillHover = false;
+float g_pillHoverMix = 0;
+RECT g_menuRest{};
+bool g_menuClosing = false;
+int g_menuAlpha = 0;
+int g_menuFadeFrom = 0;
+ULONGLONG g_menuFadeStart = 0;
 bool g_pointerDown = false;
 bool g_pointerDragged = false;
 POINT g_pointerStart{};
@@ -369,44 +377,67 @@ void SaveSettings() {
     RequestRender();
 }
 
-std::string WideToUtf8(const std::wstring& value) {
-    if (value.empty()) {
+std::wstring ConvertToWide(const std::string& value, UINT codePage, DWORD flags) {
+    if (value.empty())
         return {};
-    }
+    const int characters =
+        MultiByteToWideChar(codePage, flags, value.data(), static_cast<int>(value.size()), nullptr, 0);
+    if (characters <= 0)
+        return {};
+    std::wstring output(static_cast<size_t>(characters), L'\0');
+    const int written =
+        MultiByteToWideChar(codePage, flags, value.data(), static_cast<int>(value.size()), output.data(), characters);
+    if (written <= 0)
+        return {};
+    output.resize(static_cast<size_t>(std::min(written, characters)));
+    return output;
+}
+
+std::string WideToUtf8(const std::wstring& value) {
+    if (value.empty())
+        return {};
     const int bytes =
         WideCharToMultiByte(CP_UTF8, 0, value.data(), static_cast<int>(value.size()), nullptr, 0, nullptr, nullptr);
+    if (bytes <= 0)
+        return {};
     std::string output(static_cast<size_t>(bytes), '\0');
-    WideCharToMultiByte(CP_UTF8, 0, value.data(), static_cast<int>(value.size()), output.data(), bytes, nullptr,
-                        nullptr);
+    const int written = WideCharToMultiByte(CP_UTF8, 0, value.data(), static_cast<int>(value.size()), output.data(),
+                                            bytes, nullptr, nullptr);
+    if (written <= 0)
+        return {};
+    // Drop the unwritten tail. It is still the NUL used to size the buffer.
+    output.resize(static_cast<size_t>(std::min(written, bytes)));
     return output;
 }
 
 std::wstring Utf8ToWide(const std::string& value) {
-    if (value.empty()) {
-        return {};
-    }
-    int characters =
-        MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, value.data(), static_cast<int>(value.size()), nullptr, 0);
-    if (characters <= 0) {
-        characters = MultiByteToWideChar(CP_ACP, 0, value.data(), static_cast<int>(value.size()), nullptr, 0);
-        std::wstring fallback(static_cast<size_t>(characters), L'\0');
-        MultiByteToWideChar(CP_ACP, 0, value.data(), static_cast<int>(value.size()), fallback.data(), characters);
-        return fallback;
-    }
-    std::wstring output(static_cast<size_t>(characters), L'\0');
-    MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, value.data(), static_cast<int>(value.size()), output.data(),
-                        characters);
-    return output;
+    const std::wstring utf8 = ConvertToWide(value, CP_UTF8, MB_ERR_INVALID_CHARS);
+    return utf8.empty() && !value.empty() ? ConvertToWide(value, CP_ACP, 0) : utf8;
 }
 
 bool SaveNote();
 
+// `copied` is GetWindowText's return, not the length reported beforehand.
+// The spare tail of a length-sized buffer is L'\0'; keeping it makes the next
+// launch reject the note as unsupported binary.
+std::wstring AdoptWindowText(std::wstring text, int copied) {
+    if (copied < 0)
+        copied = 0;
+    if (static_cast<size_t>(copied) < text.size())
+        text.resize(static_cast<size_t>(copied));
+    const auto embedded = text.find(L'\0');
+    if (embedded != std::wstring::npos)
+        text.resize(embedded);
+    return text;
+}
+
 std::wstring EditorText() {
     const int length = GetWindowTextLengthW(g_edit);
+    if (length <= 0)
+        return {};
     std::wstring text(static_cast<size_t>(length) + 1, L'\0');
-    GetWindowTextW(g_edit, text.data(), length + 1);
-    text.resize(static_cast<size_t>(length));
-    return text;
+    const int copied = GetWindowTextW(g_edit, text.data(), length + 1);
+    return AdoptWindowText(std::move(text), copied);
 }
 
 bool EnsureMarkdownPreview() {
@@ -485,12 +516,16 @@ void LoadNote() {
 }
 
 bool SaveNote() {
-    if (!IsWindow(g_edit) || g_loadFailed) {
+    if (!IsWindow(g_edit) || g_loadFailed)
         return false;
-    }
+    const int reported = GetWindowTextLengthW(g_edit);
     const std::wstring text = EditorText();
+    // A failed read must not replace the note with an empty or NUL-padded file.
+    if (reported > 0 && text.empty())
+        return false;
     const std::string utf8 = WideToUtf8(text);
-
+    if (!text.empty() && (utf8.empty() || utf8.find('\0') != std::string::npos))
+        return false;
     return AtomicWrite(g_notePath, utf8);
 }
 
@@ -1259,8 +1294,11 @@ void DrawControl(HWND parent, const DRAWITEMSTRUCT* item) {
     }
     const bool pill = item->CtlID == kControlPill;
     const bool pressed = (item->itemState & ODS_SELECTED) != 0;
-    COLORREF color =
-        pill ? BlendColor(kBackground, kText, g_pillHover ? 82 : 92) : BlendColor(kBackground, kText, pressed ? 15 : 6);
+    const int pillBlend = static_cast<int>(std::lround(92.0 - 10.0 * std::clamp(g_pillHoverMix, 0.0f, 1.0f)));
+    COLORREF color = pill ? BlendColor(kBackground, kText, pillBlend)
+                          : BlendColor(kBackground, kText, pressed ? 40 : 8);
+    if (!pill && pressed)
+        InflateRect(&rect, -std::max(1, ScaleForDpi(parent, 1)), -std::max(1, ScaleForDpi(parent, 1)));
     if (pill)
         InflateRect(&rect, 0, -ScaleForDpi(parent, 3));
     SmoothRoundRect(item->hDC, rect,
@@ -1336,9 +1374,17 @@ LRESULT CALLBACK SliderProcedure(HWND window, UINT message, WPARAM wp, LPARAM lp
         return 1;
     if (message == WM_PAINT) {
         PAINTSTRUCT ps{};
-        HDC dc = BeginPaint(window, &ps);
+        HDC windowDc = BeginPaint(window, &ps);
         RECT rect{}, channel{};
         GetClientRect(window, &rect);
+        const int bufferWidth = std::max(1L, rect.right);
+        const int bufferHeight = std::max(1L, rect.bottom);
+        // The track is drawn in several passes. Painting them straight to the
+        // window shows the cleared channel before the thumb and reads as flicker.
+        HDC memory = CreateCompatibleDC(windowDc);
+        HBITMAP bitmap = memory ? CreateCompatibleBitmap(windowDc, bufferWidth, bufferHeight) : nullptr;
+        HGDIOBJ previous = bitmap ? SelectObject(memory, bitmap) : nullptr;
+        HDC dc = bitmap ? memory : windowDc;
         channel.left = ScaleForDpi(window, 10);
         channel.right = std::max(channel.left + 1, rect.right - channel.left);
 
@@ -1369,6 +1415,13 @@ LRESULT CALLBACK SliderProcedure(HWND window, UINT message, WPARAM wp, LPARAM lp
         SelectObject(dc, oldBrush);
         DeleteObject(pen);
         DeleteObject(fill);
+        if (bitmap) {
+            BitBlt(windowDc, 0, 0, bufferWidth, bufferHeight, memory, 0, 0, SRCCOPY);
+            SelectObject(memory, previous);
+            DeleteObject(bitmap);
+        }
+        if (memory)
+            DeleteDC(memory);
         EndPaint(window, &ps);
         return 0;
     }
@@ -1461,15 +1514,79 @@ void RefreshLocalizedUi() {
     UpdateMenuLabels();
 }
 
+bool InterfaceMotionEnabled() {
+    BOOL animations = TRUE;
+    SystemParametersInfoW(SPI_GETCLIENTAREAANIMATION, 0, &animations, 0);
+    return animations && !g_highContrast;
+}
+
+void PlaceMenuFrame(int alpha, int yOffset, bool frame) {
+    if (!g_menu)
+        return;
+    SetLayeredWindowAttributes(g_menu, 0, static_cast<BYTE>(std::clamp(alpha, 0, 255)), LWA_ALPHA);
+    const int width = g_menuRest.right - g_menuRest.left;
+    const int height = g_menuRest.bottom - g_menuRest.top;
+    SetWindowPos(g_menu, HWND_TOPMOST, g_menuRest.left, g_menuRest.top + yOffset, width, height,
+                 SWP_NOACTIVATE | SWP_SHOWWINDOW | (frame ? SWP_FRAMECHANGED : 0));
+}
+
+void FinishMenuHide() {
+    if (!g_menu)
+        return;
+    KillTimer(g_menu, kMenuFadeTimer);
+    g_menuClosing = false;
+    g_menuAlpha = 0;
+    ShowWindow(g_menu, SW_HIDE);
+    SetLayeredWindowAttributes(g_menu, 0, 255, LWA_ALPHA);
+    InvalidateRect(g_pill, nullptr, FALSE);
+}
+
+void TickMenuFade() {
+    constexpr float duration = 180.0f;
+    const float time = std::clamp(static_cast<float>(GetTickCount64() - g_menuFadeStart) / duration, 0.0f, 1.0f);
+    const float eased = 1.0f - std::pow(1.0f - time, 3.0f);
+    const int travel = ScaleForDpi(g_window, 12);
+    const int target = g_menuClosing ? 0 : 255;
+    g_menuAlpha = static_cast<int>(std::lround(g_menuFadeFrom + (target - g_menuFadeFrom) * eased));
+    const int offset = static_cast<int>(std::lround(travel * (1.0f - g_menuAlpha / 255.0f)));
+    PlaceMenuFrame(g_menuAlpha, offset, false);
+    if (time >= 1.0f) {
+        KillTimer(g_menu, kMenuFadeTimer);
+        g_menuAlpha = target;
+        if (g_menuClosing)
+            FinishMenuHide();
+        else
+            PlaceMenuFrame(255, 0, false);
+    }
+}
+
+void BeginMenuFade(bool closing) {
+    if (!g_menu)
+        return;
+    g_menuClosing = closing;
+    g_menuFadeFrom = g_menuAlpha;
+    g_menuFadeStart = GetTickCount64();
+    if (!InterfaceMotionEnabled()) {
+        g_menuAlpha = closing ? 0 : 255;
+        if (closing)
+            FinishMenuHide();
+        else
+            PlaceMenuFrame(255, 0, true);
+        return;
+    }
+    const int travel = ScaleForDpi(g_window, 12);
+    PlaceMenuFrame(g_menuFadeFrom, static_cast<int>(std::lround(travel * (1.0f - g_menuFadeFrom / 255.0f))), !closing);
+    SetTimer(g_menu, kMenuFadeTimer, 16, nullptr);
+}
+
 void CloseMenu() {
 #ifdef FLOATNOTE_GLASS_LAB
     CloseExperienceMenu();
 #endif
-    if (g_menu && IsWindowVisible(g_menu)) {
-        g_menuDismissedAt = GetTickCount64();
-        ShowWindow(g_menu, SW_HIDE);
-        InvalidateRect(g_pill, nullptr, FALSE);
-    }
+    if (!g_menu || !IsWindowVisible(g_menu) || g_menuClosing)
+        return;
+    g_menuDismissedAt = GetTickCount64();
+    BeginMenuFade(true);
 }
 
 void UpdateMenuScroll() {
@@ -1564,6 +1681,8 @@ void LayoutMenuForMode() {
         bounds = ConstrainToWorkArea(bounds, monitor.rcWork);
         SetWindowPos(g_menu, nullptr, bounds.left, bounds.top, width, height,
                      SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+        if (!g_menuClosing)
+            g_menuRest = bounds;
     }
     RedrawWindow(g_menu, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_UPDATENOW);
 }
@@ -1626,6 +1745,12 @@ LRESULT CALLBACK MenuProcedure(HWND window, UINT message, WPARAM wp, LPARAM lp) 
     case WM_KEYDOWN:
         if (wp == VK_ESCAPE) {
             CloseMenu();
+            return 0;
+        }
+        break;
+    case WM_TIMER:
+        if (wp == kMenuFadeTimer) {
+            TickMenuFade();
             return 0;
         }
         break;
@@ -1781,8 +1906,8 @@ void TogglePillMenu() {
     int y = pill.bottom + ScaleForDpi(g_window, 6);
     if (y + height > monitor.rcWork.bottom)
         y = std::max(static_cast<int>(monitor.rcWork.top), static_cast<int>(pill.top) - height);
-    SetLayeredWindowAttributes(g_menu, 0, 255, LWA_ALPHA);
-    SetWindowPos(g_menu, HWND_TOPMOST, x, y, width, height, SWP_SHOWWINDOW | SWP_FRAMECHANGED);
+    g_menuRest = {x, y, x + width, y + height};
+    BeginMenuFade(false);
     RoundWindow(g_menu, kCornerRadius);
     UpdateMenuScroll();
     SetForegroundWindow(g_menu);
@@ -1809,6 +1934,30 @@ void ResizeWindowFromPointerDelta(int dx, int dy) {
 #ifdef FLOATNOTE_GLASS_LAB
     MaybeAbsorbExperienceResize();
 #endif
+}
+
+void AimPillHover(bool hover) {
+    if (g_pillHover == hover && std::abs(g_pillHoverMix - (hover ? 1.0f : 0.0f)) < 0.001f)
+        return;
+    g_pillHover = hover;
+    if (!InterfaceMotionEnabled()) {
+        g_pillHoverMix = hover ? 1.0f : 0.0f;
+        KillTimer(g_window, kPillHoverTimer);
+    } else if (g_window)
+        SetTimer(g_window, kPillHoverTimer, 16, nullptr);
+    InvalidateRect(g_pill, nullptr, FALSE);
+    RequestRender();
+}
+
+void TickPillHover() {
+    const float target = g_pillHover ? 1.0f : 0.0f;
+    g_pillHoverMix += (target - g_pillHoverMix) * 0.34f;
+    if (std::abs(g_pillHoverMix - target) < 0.02f) {
+        g_pillHoverMix = target;
+        KillTimer(g_window, kPillHoverTimer);
+    }
+    InvalidateRect(g_pill, nullptr, FALSE);
+    RequestRender();
 }
 
 void MoveWindowFromPointerDelta(int dx, int dy) {
@@ -1847,20 +1996,20 @@ LRESULT CALLBACK PointerProcedure(HWND window, UINT message, WPARAM wp, LPARAM l
                 break;
             }
         }
-        if (message == WM_MOUSEMOVE && GetCapture() != g_pill) {
-            const bool hover = target == g_pill;
-            if (hover != g_pillHover) {
-                g_pillHover = hover;
-                RequestRender();
-            }
-        }
+        if (message == WM_MOUSEMOVE && GetCapture() != g_pill)
+            AimPillHover(target == g_pill);
         if (target) {
             MapWindowPoints(window, target, &point, 1);
             return SendMessageW(target, message, wp, message == WM_SETCURSOR ? lp : MAKELPARAM(point.x, point.y));
         }
     }
     if (message == WM_SETCURSOR) {
-        SetCursor(LoadCursorW(nullptr, id == kControlGrip ? IDC_SIZENWSE : IDC_HAND));
+        const wchar_t* cursor = IDC_ARROW;
+        if (id == kControlGrip)
+            cursor = IDC_SIZENWSE;
+        else if (id == kControlPill)
+            cursor = IDC_HAND;
+        SetCursor(LoadCursorW(nullptr, cursor));
         return TRUE;
     }
     if (message == WM_LBUTTONDOWN) {
@@ -1880,10 +2029,9 @@ LRESULT CALLBACK PointerProcedure(HWND window, UINT message, WPARAM wp, LPARAM l
     }
     if (message == WM_MOUSEMOVE) {
         if (id == kControlPill && !g_pillHover) {
-            g_pillHover = true;
             TRACKMOUSEEVENT track{sizeof(track), TME_LEAVE, window, 0};
             TrackMouseEvent(&track);
-            InvalidateRect(window, nullptr, FALSE);
+            AimPillHover(true);
         }
         if (g_pointerDown && GetCapture() == window) {
             POINT point{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
@@ -1902,8 +2050,7 @@ LRESULT CALLBACK PointerProcedure(HWND window, UINT message, WPARAM wp, LPARAM l
         return 0;
     }
     if (message == WM_MOUSELEAVE && id == kControlPill) {
-        g_pillHover = false;
-        InvalidateRect(window, nullptr, FALSE);
+        AimPillHover(false);
         return 0;
     }
     if (message == WM_LBUTTONUP && g_pointerDown) {
@@ -1934,6 +2081,24 @@ LRESULT CALLBACK PointerProcedure(HWND window, UINT message, WPARAM wp, LPARAM l
         RequestRender();
     return result;
 }
+struct EditCaretHit {
+    int index = -1;
+    int line = -1;
+    int lineStart = -1;
+};
+
+EditCaretHit HitFromPoint(HWND window, POINT point) {
+    EditCaretHit hit;
+    const DWORD nearest = static_cast<DWORD>(SendMessageW(window, EM_CHARFROMPOS, 0, MAKELPARAM(point.x, point.y)));
+    const int firstLine = static_cast<int>(SendMessageW(window, EM_GETFIRSTVISIBLELINE, 0, 0));
+    hit.line = firstLine + ((static_cast<int>(HIWORD(nearest)) - (firstLine & 0xffff) + 0x10000) & 0xffff);
+    hit.lineStart = static_cast<int>(SendMessageW(window, EM_LINEINDEX, hit.line, 0));
+    if (hit.lineStart < 0)
+        return hit;
+    hit.index = hit.lineStart + ((static_cast<int>(LOWORD(nearest)) - (hit.lineStart & 0xffff) + 0x10000) & 0xffff);
+    return hit;
+}
+
 bool IsTextPoint(HWND window, POINT point) {
     if (g_hitTextDirty) {
         g_hitText = EditorText();
@@ -1943,13 +2108,10 @@ bool IsTextPoint(HWND window, POINT point) {
     // An empty note must remain writable after deleting all of its text.
     if (text.empty())
         return true;
-    const DWORD nearest = static_cast<DWORD>(SendMessageW(window, EM_CHARFROMPOS, 0, MAKELPARAM(point.x, point.y)));
-    const int firstLine = static_cast<int>(SendMessageW(window, EM_GETFIRSTVISIBLELINE, 0, 0));
-    const int line = firstLine + ((static_cast<int>(HIWORD(nearest)) - (firstLine & 0xffff) + 0x10000) & 0xffff);
-    const int start = static_cast<int>(SendMessageW(window, EM_LINEINDEX, line, 0));
-    if (start < 0)
+    const EditCaretHit hit = HitFromPoint(window, point);
+    if (hit.lineStart < 0)
         return false;
-    int index = start + ((static_cast<int>(LOWORD(nearest)) - (start & 0xffff) + 0x10000) & 0xffff);
+    int index = hit.index;
     if (index < 0 || index >= static_cast<int>(text.size()) || iswspace(text[index]))
         return false;
     if (index > 0 && text[index] >= 0xdc00 && text[index] <= 0xdfff)
@@ -1972,6 +2134,47 @@ bool IsTextPoint(HWND window, POINT point) {
     if (next != -1 && GET_Y_LPARAM(next) == y && GET_X_LPARAM(next) > x)
         extent.cx = GET_X_LPARAM(next) - x;
     return point.x >= x && point.x < x + extent.cx && point.y >= y && point.y < y + metrics.tmHeight;
+}
+
+// Spaces, blank lines and the caret position after the last glyph belong to
+// that line. EM_CHARFROMPOS also clamps the area below the last line onto it,
+// so only a point inside the line's own vertical band edits instead of dragging.
+bool IsEditablePoint(HWND window, POINT point) {
+    RECT client{};
+    GetClientRect(window, &client);
+    if (!PtInRect(&client, point))
+        return false;
+    if (g_hitTextDirty) {
+        g_hitText = EditorText();
+        g_hitTextDirty = false;
+    }
+    if (g_hitText.empty())
+        return true;
+    const EditCaretHit hit = HitFromPoint(window, point);
+    if (hit.lineStart < 0)
+        return false;
+    const LRESULT origin = SendMessageW(window, EM_POSFROMCHAR, hit.lineStart, 0);
+    if (origin == -1)
+        return false;
+    const int lineTop = GET_Y_LPARAM(origin);
+    const int lineCount = static_cast<int>(SendMessageW(window, EM_GETLINECOUNT, 0, 0));
+    int lineBottom = lineTop;
+    if (hit.line + 1 < lineCount) {
+        const int next = static_cast<int>(SendMessageW(window, EM_LINEINDEX, hit.line + 1, 0));
+        const LRESULT nextPos = next >= 0 ? SendMessageW(window, EM_POSFROMCHAR, next, 0) : -1;
+        if (nextPos != -1)
+            lineBottom = GET_Y_LPARAM(nextPos);
+    }
+    if (lineBottom <= lineTop) {
+        HDC dc = GetDC(window);
+        const auto font = SelectObject(dc, g_textFont);
+        TEXTMETRICW metrics{};
+        GetTextMetricsW(dc, &metrics);
+        SelectObject(dc, font);
+        ReleaseDC(window, dc);
+        lineBottom = lineTop + std::max(1, static_cast<int>(metrics.tmHeight));
+    }
+    return point.y >= lineTop && point.y < lineBottom;
 }
 
 LRESULT CALLBACK EditProcedure(HWND window, UINT message, WPARAM wParam, LPARAM lParam, UINT_PTR, DWORD_PTR) {
@@ -2011,7 +2214,7 @@ LRESULT CALLBACK EditProcedure(HWND window, UINT message, WPARAM wParam, LPARAM 
         if(message==WM_SETCURSOR) {
             POINT point{};GetCursorPos(&point);ScreenToClient(window,&point);size_t source=0;
             const bool hit=EnsureMarkdownPreview()?g_markdownPreview.Hit(point,source):IsTextPoint(window,point);
-            SetCursor(LoadCursorW(nullptr,hit?IDC_IBEAM:IDC_HAND));return TRUE;
+            SetCursor(LoadCursorW(nullptr,hit?IDC_IBEAM:IDC_ARROW));return TRUE;
         }
         if(message==WM_MOUSEWHEEL && !(GET_KEYSTATE_WPARAM(wParam)&MK_CONTROL) && EnsureMarkdownPreview()) {
             g_scrollRemainder+=GET_WHEEL_DELTA_WPARAM(wParam);
@@ -2028,7 +2231,7 @@ LRESULT CALLBACK EditProcedure(HWND window, UINT message, WPARAM wParam, LPARAM 
         if(message==WM_CHAR || message==WM_KEYDOWN || message==WM_CUT || message==WM_PASTE || message==WM_CLEAR)return 0;
     }
     if ((message == WM_LBUTTONDOWN || message == WM_LBUTTONDBLCLK) &&
-        !IsTextPoint(window, {GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)}))
+        !IsEditablePoint(window, {GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)}))
         return PointerProcedure(window, WM_LBUTTONDOWN, wParam, lParam, 0, 0);
     if (message == WM_CAPTURECHANGED)
         g_pointerDown = false;
@@ -2039,7 +2242,7 @@ LRESULT CALLBACK EditProcedure(HWND window, UINT message, WPARAM wParam, LPARAM 
         POINT point{};
         GetCursorPos(&point);
         ScreenToClient(window, &point);
-        SetCursor(LoadCursorW(nullptr, IsTextPoint(window, point) ? IDC_IBEAM : IDC_HAND));
+        SetCursor(LoadCursorW(nullptr, IsEditablePoint(window, point) ? IDC_IBEAM : IDC_ARROW));
         return TRUE;
     }
     if (message == WM_MOUSEWHEEL && (GET_KEYSTATE_WPARAM(wParam) & MK_CONTROL)) {
@@ -2331,8 +2534,9 @@ void DrawCompositedDecorations(RECT outer) {
     OffsetRect(&pill, -outer.left, -outer.top);
 #ifndef FLOATNOTE_GLASS_LAB
     InflateRect(&pill, 0, -ScaleForDpi(g_window, 3));
+    const int pillBlend = static_cast<int>(std::lround(92.0 - 10.0 * std::clamp(g_pillHoverMix, 0.0f, 1.0f)));
     CompositeRoundRect(pill, (pill.bottom - pill.top) * 0.5f,
-                       g_highContrast ? kText : BlendColor(kBackground, kText, g_pillHover ? 82 : 92));
+                       g_highContrast ? kText : BlendColor(kBackground, kText, pillBlend));
     const COLORREF dots = (g_saveFailed || g_settingsFailed || g_loadFailed) ? RGB(255, 162, 131)
                           : g_settings.passThrough                           ? RGB(129, 201, 233)
                                                                              : kBackground;
@@ -2458,8 +2662,13 @@ void RenderLayeredWindow() {
             const DWORD rgb = pixel & 0xffffff;
             const COLORREF color = RGB((rgb >> 16) & 255, (rgb >> 8) & 255, rgb & 255);
             pixel = PremultiplyPixel(color, rgb == background ? opacity : 255);
-            if (editorVisible && x >= editor.left && x < editor.right && y >= editor.top && y < editor.bottom) {
-                const int index = (y - editor.top) * g_textOnBlack.width + x - editor.left;
+            // Keep the previous window-rectangle placement. The mask itself is only
+            // the client, so a scrollbar must not be used as an index into it.
+            const int localX = x - static_cast<int>(editor.left);
+            const int localY = y - static_cast<int>(editor.top);
+            if (editorVisible && x >= editor.left && x < editor.right && y >= editor.top && y < editor.bottom &&
+                localX >= 0 && localY >= 0 && localX < g_textOnBlack.width && localY < g_textOnBlack.height) {
+                const int index = localY * g_textOnBlack.width + localX;
                 const DWORD black = g_textOnBlack.pixels[index] & 0xffffff;
                 const DWORD white = g_textOnWhite.pixels[index] & 0xffffff;
                 if (black == white) {
@@ -2703,7 +2912,9 @@ LRESULT CALLBACK WindowProcedure(HWND window, UINT message, WPARAM wParam, LPARA
         else if (wParam == 2) {
             KillTimer(window, 2);
             SaveSettings();
-        } else if (wParam == kCaretTimer) {
+        } else if (wParam == kPillHoverTimer)
+            TickPillHover();
+        else if (wParam == kCaretTimer) {
             if (!g_markdownEditing || GetFocus() != g_edit || GetForegroundWindow() != g_window || !g_isVisible || g_settings.passThrough)
                 KillTimer(window, kCaretTimer);
             else {

@@ -1,4 +1,4 @@
-# FloatNote 2.2.0 — 快速开始 / Quick start
+# FloatNote 2.2.1 — 快速开始 / Quick start
 
 1. 解压 ZIP 到可写目录，双击 FloatNote.exe。无需编译源码。
 2. 鼠标移到便签顶部提示附近，进入设置；右下角拖动调整大小。

@@ -2,6 +2,28 @@
 
 All notable changes are documented here. FloatNote follows [Semantic Versioning](https://semver.org/).
 
+## [2.2.1] - 2026-09-28
+
+### Fixed
+
+- Bound glyph-mask reads to the editor client buffer while retaining text placement and automatic ink behavior.
+- Avoid saving NUL padding or replacing a note after a failed text read or encoding conversion.
+- Keep spaces, line endings and blank lines editable without starting a window drag.
+- Remove the duplicate system-rounded outline around the custom settings panel.
+
+### Improved
+
+- Smooth settings-panel transitions and hover feedback, stronger pressed states and buffered slider painting.
+- Preserve transition position when closing during entry; clear hover state on close and honor disabled animations.
+- Add final-pixel ink and settings-animation regression coverage. Background-sampling scope is unchanged.
+
+## [2.2.0] - 2026-09-18
+
+### Added
+
+- Automatic Markdown preview with source-position-aware click-to-edit, native IME and undo preservation.
+- Common Markdown formatting, source-preserving persistence, wrapping and preview scrolling.
+
 ## [2.1.0] - 2026-09-13
 
 ### Added

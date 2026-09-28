@@ -65,7 +65,8 @@ public:
         type.lpszClassName = ClassName;
         RegisterClassExW(&type);
         // No owner: WDA_EXCLUDEFROMCAPTURE on the note cannot hide this surface.
-        window_ = CreateWindowExW(WS_EX_TOOLWINDOW, ClassName, L"便签控制", WS_POPUP | WS_THICKFRAME,
+        window_ = CreateWindowExW(WS_EX_TOOLWINDOW, ClassName, L"便签控制",
+                                  WS_POPUP | WS_THICKFRAME | WS_CLIPCHILDREN,
                                   0, 0, 320, 528, nullptr, nullptr, instance, this);
         if (!window_) { Destroy(); return false; }
         SetWindowDisplayAffinity(window_, WDA_NONE);
@@ -73,7 +74,9 @@ public:
         DwmExtendFrameIntoClientArea(window_, &margin);
         const DWMNCRENDERINGPOLICY policy = DWMNCRP_ENABLED;
         DwmSetWindowAttribute(window_, DWMWA_NCRENDERING_POLICY, &policy, sizeof(policy));
-        const DWORD roundCorners = 2;
+        // The canvas and window region already share the card radius. System
+        // rounding adds a second, smaller-radius outline outside that surface.
+        const DWORD roundCorners = 1; // DWMWCP_DONOTROUND
         DwmSetWindowAttribute(window_, static_cast<DWMWINDOWATTRIBUTE>(33), &roundCorners, sizeof(roundCorners));
         canvas_ = CreateWindowExW(WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE,
                                   L"STATIC", L"", WS_CHILD | WS_VISIBLE, 0, 0, 320, 528,
@@ -112,11 +115,12 @@ public:
         useBackdrop_ = !IntersectRect(&overlap, &target_, &noteRect) && !HighContrast();
         closing_ = false;
         modalOpen_ = false;
+        ResetHoverVisuals();
         closedNotified_ = false;
         opacity_ = 255;
         mouseWasDown_ = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0;
         SetWindowPos(window_, HWND_TOPMOST, target_.left, target_.top, width_, height_,
-                     SWP_NOACTIVATE | SWP_FRAMECHANGED);
+                     SWP_NOACTIVATE | SWP_NOREDRAW | SWP_FRAMECHANGED);
         const int diameter = Px(40);
         HRGN shape = CreateRoundRectRgn(0, 0, width_ + 1, height_ + 1, diameter, diameter);
         if (shape && !SetWindowRgn(window_, shape, FALSE)) DeleteObject(shape);
@@ -133,6 +137,11 @@ public:
         animationFrom_ = animated_ ? 0.0f : 1.0f;
         animationTo_ = 1.0f;
         opacity_ = animated_ ? 0 : 255;
+        const int travel = animated_ ? Px(14) : 0;
+        // Place the first visible frame on the fade, not at the resting position.
+        SetWindowPos(window_, HWND_TOPMOST, target_.left, target_.top + travel, width_, height_,
+                     SWP_NOACTIVATE | SWP_FRAMECHANGED);
+        backdrop_.SetOpacity(static_cast<float>(opacity_) / 255.0f);
         Render();
         ShowWindow(window_, SW_SHOWNORMAL);
         SetForegroundWindow(window_);
@@ -251,7 +260,7 @@ public:
 
 private:
     static constexpr wchar_t ClassName[] = L"FloatNote.GlassControlPopover";
-    static constexpr UINT_PTR AnimationTimer = 41, OutsideTimer = 42;
+    static constexpr UINT_PTR AnimationTimer = 41, OutsideTimer = 42, HoverTimer = 43;
     static constexpr float HeaderHeight = 54.0f;
     static constexpr std::array<const wchar_t*, 3> CloseBehaviors{L"每次询问", L"隐藏到托盘", L"退出应用"};
     struct Control {
@@ -305,6 +314,9 @@ private:
     bool useBackdrop_ = false, closing_ = false, animated_ = false, closedNotified_ = true, mouseWasDown_ = false, labelsReady_ = false, modalOpen_ = false;
     bool presenting_ = false; // Hidden panels cache state; they never submit a layered surface.
     BYTE opacity_ = 255;
+    struct HoverVisual { HWND window = nullptr; float amount = 0; };
+    HoverVisual hoverCurrent_{}, hoverPrevious_{};
+    ULONGLONG hoverTick_ = 0;
     ULONGLONG animationStart_ = 0;
     float animationFrom_ = 0, animationTo_ = 1;
 
@@ -584,10 +596,69 @@ private:
         default: return false;
         }
     }
+    static Gdiplus::Color FadeColor(Gdiplus::Color from, Gdiplus::Color to, float amount) {
+        amount = std::clamp(amount, 0.0f, 1.0f);
+        auto channel = [&](BYTE start, BYTE end) {
+            return static_cast<BYTE>(std::lround(start + (end - start) * amount));
+        };
+        return Gdiplus::Color(channel(from.GetA(), to.GetA()), channel(from.GetR(), to.GetR()),
+                              channel(from.GetG(), to.GetG()), channel(from.GetB(), to.GetB()));
+    }
+    float HoverAmount(HWND window) const {
+        float amount = 0;
+        if (window && window == hoverCurrent_.window)
+            amount = std::max(amount, hoverCurrent_.amount);
+        if (window && window == hoverPrevious_.window)
+            amount = std::max(amount, hoverPrevious_.amount);
+        return amount;
+    }
+    void NoteHover(HWND window) {
+        if (hovered_ == window)
+            return;
+        const float amount = HoverAmount(window);
+        if (hoverCurrent_.window != window) {
+            if (hoverCurrent_.amount > 0.01f)
+                hoverPrevious_ = hoverCurrent_;
+            hoverCurrent_ = {window, amount};
+        }
+        hovered_ = window;
+        if (!animated_) {
+            hoverCurrent_ = {window, window ? 1.0f : 0.0f};
+            hoverPrevious_ = {};
+            KillTimer(window_, HoverTimer);
+            Render();
+            return;
+        }
+        hoverTick_ = GetTickCount64();
+        if (window_)
+            SetTimer(window_, HoverTimer, 16, nullptr);
+    }
+    void ResetHoverVisuals() {
+        if (window_) KillTimer(window_, HoverTimer);
+        hovered_ = nullptr;
+        hoverCurrent_ = hoverPrevious_ = {};
+    }
+    void TickHover() {
+        const auto now = GetTickCount64();
+        const float amount = 1.0f - std::exp(-static_cast<float>(now - hoverTick_) / 42.0f);
+        hoverTick_ = now;
+        auto step = [amount](HoverVisual& item, float target) {
+            item.amount += (target - item.amount) * amount;
+            if (std::abs(item.amount - target) < 0.02f)
+                item.amount = target;
+        };
+        step(hoverCurrent_, hovered_ ? 1.0f : 0.0f);
+        step(hoverPrevious_, 0.0f);
+        Render();
+        if ((!hovered_ || hoverCurrent_.amount >= 1.0f) && hoverPrevious_.amount <= 0.0f)
+            KillTimer(window_, HoverTimer);
+    }
     void DrawControl(Gdiplus::Graphics& graphics, const Control& item) {
         using namespace Gdiplus;
         auto r = item.rectangle;
-        const bool hover = item.window == hovered_, pressed = (SendMessageW(item.window, BM_GETSTATE, 0, 0) & BST_PUSHED) != 0;
+        const float hoverAmount = HoverAmount(item.window);
+        const bool hover = hoverAmount > 0.04f;
+        const bool pressed = (SendMessageW(item.window, BM_GETSTATE, 0, 0) & BST_PUSHED) != 0;
         const bool selected = Selected(item);
         const Color ink(255, 31, 35, 43), blue(255, 30, 105, 215), secondary(255, 100, 107, 117);
         const bool swatch = item.action == Action::BackgroundClear || item.action == Action::BackgroundPreset ||
@@ -602,10 +673,10 @@ private:
             if (item.action == Action::TextPreset) color = state_.textColors[item.value];
             // The add target lives directly on the same panel material as the
             // palette. Its center has no independently filled section/card.
-            Round(graphics, disc, disc.Width / 2, add ? Color(hover ? 24 : 0, 45, 105, 185) :
+            Round(graphics, disc, disc.Width / 2, add ? Color(static_cast<BYTE>(std::lround(24 * hoverAmount)), 45, 105, 185) :
                 Color(255, GetRValue(color), GetGValue(color), GetBValue(color)), Color(65, 80, 88, 100));
             if (add) {
-                Pen plus(hover ? blue : secondary, 1.5f); plus.SetStartCap(LineCapRound); plus.SetEndCap(LineCapRound);
+                Pen plus(FadeColor(secondary, blue, hoverAmount), 1.5f); plus.SetStartCap(LineCapRound); plus.SetEndCap(LineCapRound);
                 const float cx = disc.X + disc.Width / 2, cy = disc.Y + disc.Height / 2;
                 graphics.DrawLine(&plus, cx - 5, cy, cx + 5, cy);
                 graphics.DrawLine(&plus, cx, cy - 5, cx, cy + 5);
@@ -613,8 +684,8 @@ private:
                 Pen slash(Color(255, 139, 148, 158), 1.1f);
                 graphics.DrawLine(&slash, disc.X + 5, disc.GetBottom() - 5, disc.GetRight() - 5, disc.Y + 5);
             } else if (item.action == Action::TextAutomatic) Text(graphics, L"A", disc, 13, ink, true, true);
-            if (selected || hover) {
-                Pen outline(selected ? blue : Color(90, 90, 110, 135), selected ? 1.8f : 1.0f);
+            if (selected || hover || pressed) {
+                Pen outline(selected ? blue : Color(static_cast<BYTE>(std::lround(90 * std::max(hoverAmount, pressed ? 1.0f : 0.0f))), 90, 110, 135), selected ? 1.8f : 1.0f);
                 graphics.DrawEllipse(&outline, r.X + .8f, r.Y + .8f, r.Width - 1.6f, r.Height - 1.6f);
             }
         } else if (item.action == Action::ToggleTopmost || item.action == Action::TogglePassThrough) {
@@ -640,11 +711,16 @@ private:
             Text(graphics, item.action == Action::ToggleTopmost ? L"置顶" : L"鼠标穿透",
                  {r.X + inset, r.Y, r.Width - inset - 27, r.Height}, showIcon ? 11.0f : 9.8f, ink, true);
             Text(graphics, selected ? L"开" : L"关", {r.GetRight() - 28, r.Y, 23, r.Height}, 10, selected ? blue : secondary, false, true);
-            if (hover) Round(graphics, r, 11, Color(20, 45, 105, 185));
+            if (hoverAmount > 0.01f)
+                Round(graphics, r, 11, Color(static_cast<BYTE>(std::lround(28 * hoverAmount)), 45, 105, 185));
+            if (pressed)
+                Round(graphics, r, 11, Color(78, 45, 105, 185));
         } else if (item.action == Action::MaterialLiquid || item.action == Action::MaterialAcrylic ||
                    item.action == Action::MaterialSolid || item.action == Action::CloseBehavior) {
             if (selected) { r.Inflate(-2, -3); Round(graphics, r, 9, Color(255, 255, 255, 255), Color(28, 80, 90, 105)); }
-            else if (hover) Round(graphics, r, 9, Color(90, 255, 255, 255));
+            else if (pressed) Round(graphics, r, 9, Color(168, 198, 214, 234));
+            else if (hoverAmount > 0.01f)
+                Round(graphics, r, 9, Color(static_cast<BYTE>(std::lround(96 * hoverAmount)), 255, 255, 255));
             const wchar_t* label = item.action == Action::CloseBehavior ? CloseBehaviors[item.value] :
                 item.action == Action::MaterialLiquid ? L"液态玻璃" : item.action == Action::MaterialAcrylic ? L"毛玻璃" : L"纯色";
             const float size = item.action == Action::CloseBehavior && logicalWidth_ < 280 ? 10.0f : 11.5f;
@@ -662,8 +738,12 @@ private:
             default: break;
             }
             const bool tile = item.action == Action::SmallerText || item.action == Action::LargerText;
-            if (tile || hover || pressed) Round(graphics, r, 10, pressed ? Color(110, 200, 214, 234) :
-                hover ? Color(95, 218, 228, 244) : Color(155, 255, 255, 255), tile ? Color(28, 90, 100, 115) : Color(0, 0, 0, 0));
+            const Color idle(tile ? 155 : 0, 255, 255, 255);
+            const Color hot(150, 214, 226, 242);
+            const Color down(215, 168, 190, 220);
+            if (tile || hoverAmount > 0.01f || pressed)
+                Round(graphics, r, 10, pressed ? down : FadeColor(idle, hot, hoverAmount),
+                      tile ? Color(28, 90, 100, 115) : Color(0, 0, 0, 0));
             Text(graphics, label, r, item.action == Action::Close ? 12.0f : 11.5f, color,
                  item.action == Action::Close, true);
         }
@@ -755,6 +835,7 @@ private:
     }
     void FinishClose() {
         presenting_ = false;
+        ResetHoverVisuals();
         KillTimer(window_, AnimationTimer);
         KillTimer(window_, OutsideTimer);
         ShowWindow(window_, SW_HIDE);
@@ -768,13 +849,16 @@ private:
         }
     }
     void TickAnimation() {
-        const float duration = closing_ ? 125.0f : 155.0f;
+        const float duration = closing_ ? 170.0f : 210.0f;
         const float time = animated_ ? std::clamp(static_cast<float>(GetTickCount64() - animationStart_) / duration, 0.0f, 1.0f) : 1.0f;
         const float eased = 1 - std::pow(1 - time, 3.0f);
         const float progress = animationFrom_ + (animationTo_ - animationFrom_) * eased;
         opacity_ = static_cast<BYTE>(std::clamp(std::lround(progress * 255), 0L, 255L));
-        SetWindowPos(window_, nullptr, target_.left, target_.top - Px((1 - progress) * 6), 0, 0,
-                     SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOZORDER);
+        const int travel = animated_ ? Px(14) : 0;
+        const float remaining = 1.0f - progress;
+        SetWindowPos(window_, nullptr, target_.left, target_.top + static_cast<int>(std::lround(travel * remaining)),
+                     0, 0, SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOZORDER);
+        backdrop_.SetOpacity(static_cast<float>(opacity_) / 255.0f);
         Render();
         if (time >= 1) {
             KillTimer(window_, AnimationTimer);
@@ -811,12 +895,20 @@ private:
     static LRESULT CALLBACK InputProcedure(HWND window, UINT message, WPARAM wp, LPARAM lp,
                                             UINT_PTR, DWORD_PTR reference) {
         auto* self = reinterpret_cast<Panel*>(reference);
+        if ((window == self->slider_ || window == self->blurSlider_) &&
+            (message == WM_ERASEBKGND || message == WM_PAINT)) {
+            if (message == WM_ERASEBKGND)
+                return 1;
+            PAINTSTRUCT paint{};
+            BeginPaint(window, &paint);
+            EndPaint(window, &paint);
+            return 0;
+        }
         if (message == WM_MOUSEMOVE) {
-            if (self->hovered_ != window) { self->hovered_ = window; self->Render(); }
+            self->NoteHover(window);
             TRACKMOUSEEVENT track{sizeof(track), TME_LEAVE, window, 0}; TrackMouseEvent(&track);
         } else if (message == WM_MOUSELEAVE) {
-            if (self->hovered_ == window) self->hovered_ = nullptr;
-            self->Render();
+            if (self->hovered_ == window) self->NoteHover(nullptr);
         } else if (message == WM_SETFOCUS) {
             self->EnsureVisible(window);
             self->Render();
@@ -876,6 +968,7 @@ private:
         case WM_TIMER:
             if (wp == AnimationTimer) self->TickAnimation();
             if (wp == OutsideTimer) self->CheckOutside();
+            if (wp == HoverTimer) self->TickHover();
             return 0;
         case WM_ACTIVATE:
             if (LOWORD(wp) == WA_INACTIVE && self->Visible() && !self->modalOpen_) {

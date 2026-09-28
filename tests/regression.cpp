@@ -144,6 +144,34 @@ int main() {
         GetClientRect(g_edit, &editorBounds);
         const POINT blank{editorBounds.right - 6, editorBounds.bottom - 6};
         Check(!IsTextPoint(g_edit, blank), "blank editor area is not treated as text");
+        std::wstring staleLength(8, L'\0');
+        staleLength[0] = L'H';
+        staleLength[1] = L'i';
+        Check(AdoptWindowText(staleLength, 2) == L"Hi", "stale editor length cannot append NUL padding");
+        Check(AdoptWindowText(std::wstring(L"a\0b", 3), 3) == L"a", "embedded NUL is dropped before a note is saved");
+        const int emptyLine = static_cast<int>(SendMessageW(g_edit, EM_LINEINDEX, 1, 0));
+        const LRESULT emptyOrigin = SendMessageW(g_edit, EM_POSFROMCHAR, emptyLine, 0);
+        const POINT emptyLinePoint{8, GET_Y_LPARAM(emptyOrigin) + 2};
+        Check(IsEditablePoint(g_edit, emptyLinePoint) && !IsTextPoint(g_edit, emptyLinePoint),
+              "empty lines accept a caret without counting as a glyph");
+        const LRESULT firstOrigin = SendMessageW(g_edit, EM_POSFROMCHAR, 0, 0);
+        const POINT caretLineEnd{editorBounds.right - 4, GET_Y_LPARAM(firstOrigin) + 2};
+        Check(IsEditablePoint(g_edit, caretLineEnd) && !IsTextPoint(g_edit, caretLineEnd),
+              "the caret position after a line accepts a click");
+        Check(!IsEditablePoint(g_edit, blank), "the area below the text still drags the note");
+        SetWindowTextW(g_edit, L"A B");
+        const LRESULT spaceOrigin = SendMessageW(g_edit, EM_POSFROMCHAR, 1, 0);
+        const POINT spacePoint{GET_X_LPARAM(spaceOrigin) + 1, GET_Y_LPARAM(spaceOrigin) + 2};
+        g_markdownEditing = true;
+        SendMessageW(g_edit, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(spacePoint.x, spacePoint.y));
+        Check(!g_pointerDown && g_markdownEditing, "clicking a space edits instead of dragging the note");
+        SendMessageW(g_edit, WM_LBUTTONUP, 0, MAKELPARAM(spacePoint.x, spacePoint.y));
+        SetWindowTextW(g_edit, L"Hello\r\n\r\n世界");
+        g_markdownEditing = true;
+        SendMessageW(g_edit, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(blank.x, blank.y));
+        Check(g_pointerDown && !g_markdownEditing, "clicking below the text leaves editing and arms a drag");
+        SendMessageW(g_edit, WM_LBUTTONUP, 0, MAKELPARAM(blank.x, blank.y));
+        Check(!g_pointerDown, "releasing a stationary click does not keep the drag");
         SendMessageW(g_edit, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(glyphPoint.x, glyphPoint.y));
         Check(!g_pointerDown, "pressing text stays in native editing and selection");
         SendMessageW(g_edit, WM_LBUTTONUP, 0, MAKELPARAM(glyphPoint.x, glyphPoint.y));
@@ -192,6 +220,26 @@ int main() {
         SavePendingNote();
         LoadNote();
         Check(EditorText().empty() && ReadBytes(g_notePath).empty(), "empty note survives save/reload");
+        const auto editStyle = GetWindowLongPtrW(g_edit, GWL_STYLE);
+        SetWindowLongPtrW(g_edit, GWL_STYLE, editStyle | WS_VSCROLL);
+        SetWindowPos(g_edit, nullptr, 0, 0, 0, 0,
+                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+        RECT scrolledClient{}, scrolledWindow{};
+        GetClientRect(g_edit, &scrolledClient);
+        GetWindowRect(g_edit, &scrolledWindow);
+        Check(scrolledClient.right > 0 && scrolledClient.right < scrolledWindow.right - scrolledWindow.left,
+              "scrollbar fixture separates the editor client from its window");
+        SetWindowTextW(g_edit, L"Scrollbar");
+        g_isVisible = true;
+        RenderLayeredWindow();
+        g_isVisible = false;
+        Check(g_textOnBlack.pixels && g_textOnBlack.width == scrolledClient.right &&
+                  g_textOnBlack.height == scrolledClient.bottom,
+              "glyph mask follows the editor client when a scrollbar is present");
+        SetWindowLongPtrW(g_edit, GWL_STYLE, editStyle);
+        SetWindowPos(g_edit, nullptr, 0, 0, 0, 0,
+                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+        SetWindowTextW(g_edit, L"");
 
         Check(AtomicWrite(g_notePath, std::string("\xef\xbb\xbf") + WideToUtf8(expected)), "create UTF-8 BOM fixture");
         LoadNote();
@@ -307,17 +355,15 @@ int main() {
               "smaller replacement displays fit the whole note into their work area");
 
         SetWindowTextW(g_edit, L"hello\r\nnext");
+        BeginMarkdownEditing();
         GetWindowRect(g_window, &originalBounds);
         POINT lineEnd{static_cast<LONG>(editorBounds.right - 10), 5};
         MapWindowPoints(g_edit, g_window, &lineEnd, 1);
         SendMessageW(g_window, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(lineEnd.x, lineEnd.y));
         SendMessageW(g_window, WM_LBUTTONUP, 0, MAKELPARAM(lineEnd.x, lineEnd.y));
-        DWORD selectionStart = 0, selectionEnd = 0;
-        SendMessageW(g_edit, EM_GETSEL, reinterpret_cast<WPARAM>(&selectionStart),
-                     reinterpret_cast<LPARAM>(&selectionEnd));
         GetWindowRect(g_window, &moved);
-        Check(EqualRect(&originalBounds, &moved) && !g_markdownEditing && EditorText()==L"hello\r\nnext",
-              "clicking blank line space returns to preview; only dragging moves the note");
+        Check(EqualRect(&originalBounds, &moved) && g_markdownEditing && EditorText()==L"hello\r\nnext",
+              "clicking the end of a line keeps editing and does not move the note");
 
         std::wstring largeNote;
         for (int line = 0; line < 4500; ++line)
