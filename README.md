@@ -6,7 +6,7 @@
 
 ![FloatNote 桌面效果](docs/media/desktop.webp)
 
-> 展示素材录自本地开发版，所示视觉与交互改进已包含在 v2.1.0 中。
+> 桌面与动效素材录自 v2.1.0 本地开发版；设置面板展示 v2.3.0 原生渲染。
 
 **[下载最新版](https://github.com/Fryingpan-Jason/FloatNote-Liquid-Glass/releases/latest)** · [液态玻璃实现说明](docs/WINDOWS_LIQUID_GLASS.md)
 
@@ -23,9 +23,11 @@
 <details>
 <summary>外观设置</summary>
 
-液态玻璃、毛玻璃与纯色；支持颜色、字号、模糊、置顶和鼠标穿透。
+液态玻璃、毛玻璃与纯色；支持颜色、字号、模糊、置顶和鼠标穿透。设置跟随系统浅深色主题，窄工作区也能访问完整选项。
 
-![外观设置](docs/media/settings.webp)
+![浅色设置](docs/media/settings-light.png)
+
+![深色设置](docs/media/settings-dark.png)
 
 </details>
 

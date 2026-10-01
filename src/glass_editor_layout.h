@@ -32,13 +32,18 @@ inline Layout Calculate(int width,int height,float radiusDip,float scale) {
     }
 
     const int inscribed=static_cast<int>(std::ceil(radius*.292894f))+px(3);
+    // Spacious notes gain a little breathing room; small or shallow notes keep
+    // the full text height. The interpolation avoids jumps while resizing.
+    const float space=std::clamp(std::min((width/scale-240.0f)/240.0f,
+                                         (height/scale-140.0f)/180.0f),0.0f,1.0f);
+    const int padding=px(12+6*space);
     // Recover vertical space on shallow cards, but move padding by at most
     // 6 DIP on large circles so their editor does not become a narrow column.
-    const int vertical=std::max(px(12),inscribed-px(6));
+    const int vertical=std::max(padding,inscribed-px(6));
     const float guard=static_cast<float>(px(2));
     const float innerY=std::max(0.0f,vertical-guard);
     const float dy=std::max(0.0f,radius-innerY);
-    const int horizontal=std::max(px(12),static_cast<int>(std::ceil(
+    const int horizontal=std::max(padding,static_cast<int>(std::ceil(
         radius-std::sqrt(std::max(0.0f,radius*radius-dy*dy))+guard)));
     const int left=std::min(horizontal,std::max(0,width-2));
     const int top=std::min(vertical,std::max(0,height-2));

@@ -19,6 +19,7 @@ For the liquid-glass renderer, source map and adaptation boundaries, start with 
 - `src/version.h` / `src/resources.rc` — the single product version and executable metadata.
 - `tests/regression.cpp` — hidden, deterministic native behavior checks.
 - `tests/glass_markdown.cpp` — automatic preview/edit switching, source persistence, undo, IME lifecycle, wrapping and transparent text composition with isolated data.
+- `tests/glass_popover_layout.cpp` — hidden native settings layouts, complete palettes, keyboard reachability, light/dark contrast and DPI changes.
 - `tests/integration.cpp` — focused compositor and interaction checks that open temporary windows.
 - `tests/visuals.cpp` — shadow, tint, text antialiasing, custom text color, and settings screenshot checks.
 - `tests/visual_test_support.h` — shared fixtures and compositor capture helpers.

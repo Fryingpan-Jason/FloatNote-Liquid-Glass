@@ -65,9 +65,9 @@ public:
         type.lpszClassName = ClassName;
         RegisterClassExW(&type);
         // No owner: WDA_EXCLUDEFROMCAPTURE on the note cannot hide this surface.
-        window_ = CreateWindowExW(WS_EX_TOOLWINDOW, ClassName, L"便签控制",
+        window_ = CreateWindowExW(WS_EX_TOOLWINDOW, ClassName, L"便签设置",
                                   WS_POPUP | WS_THICKFRAME | WS_CLIPCHILDREN,
-                                  0, 0, 320, 528, nullptr, nullptr, instance, this);
+                                  0, 0, 344, 630, nullptr, nullptr, instance, this);
         if (!window_) { Destroy(); return false; }
         SetWindowDisplayAffinity(window_, WDA_NONE);
         MARGINS margin{-1, -1, -1, -1};
@@ -85,6 +85,7 @@ public:
         BuildControls();
         if (!slider_ || !blurSlider_ || controls_.size() != 28 || std::any_of(controls_.begin(), controls_.end(),
                 [](const Control& control) { return !control.window; })) { Destroy(); return false; }
+        RefreshAppearance();
         return true;
     }
 
@@ -102,14 +103,15 @@ public:
         state_.closeBehavior = std::clamp(state_.closeBehavior, 0, 2);
         scroll_ = 0;
         MONITORINFO monitor{sizeof(monitor)};
-        GetMonitorInfoW(MonitorFromRect(&noteRect, MONITOR_DEFAULTTONEAREST), &monitor);
-        work_ = monitor.rcWork;
+        work_ = {0, 0, GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN)};
+        if (GetMonitorInfoW(MonitorFromRect(&noteRect, MONITOR_DEFAULTTONEAREST), &monitor)) work_ = monitor.rcWork;
         noteRect_ = noteRect;
-        width_ = std::min(Px(320), std::max(Px(200), static_cast<int>(work_.right - work_.left) - Px(16)));
-        height_ = std::min(Px(ContentHeight()), std::max(Px(150), static_cast<int>(work_.bottom - work_.top) - Px(16)));
-        // Narrow screens shrink only horizontal spacing. Text and targets retain
-        // their DPI size; short work areas scroll the body below a fixed header.
+        width_ = std::min(Px(344), std::max(1, static_cast<int>(work_.right - work_.left) - Px(16)));
         logicalWidth_ = static_cast<float>(width_) / scale_;
+        height_ = std::min(Px(ContentHeight()), std::max(1, static_cast<int>(work_.bottom - work_.top) - Px(16)));
+        // Narrow work areas wrap palettes and stack longer choices. Short work
+        // areas scroll the body below the fixed, independently usable header.
+        RefreshAppearance();
         target_ = Place(noteRect);
         RECT overlap{};
         useBackdrop_ = !IntersectRect(&overlap, &target_, &noteRect) && !HighContrast();
@@ -177,8 +179,15 @@ public:
                 const COLORREF color = item.action == Action::BackgroundPreset ?
                     state_.backgroundColors[item.value] : state_.textColors[item.value];
                 const std::wstring label = std::wstring(item.action == Action::BackgroundPreset ? L"背景颜色：" : L"文字颜色：") + ColorLabel(color);
-                SetWindowTextW(item.window, label.c_str());
+                SetWindowTextW(item.window, (label + (Selected(item) ? L"，已选中" : L"")).c_str());
             }
+            const wchar_t* label = item.action == Action::MaterialLiquid ? L"材质：液态玻璃" :
+                item.action == Action::MaterialAcrylic ? L"材质：毛玻璃" :
+                item.action == Action::MaterialSolid ? L"材质：纯色" :
+                item.action == Action::BackgroundClear ? L"背景颜色：透明" :
+                item.action == Action::TextAutomatic ? L"文字颜色：自动适应背景" : nullptr;
+            if (label) SetWindowTextW(item.window, (std::wstring(label) +
+                (Selected(item) ? L"，已选中" : L"，点击选择")).c_str());
         }
         for (const auto& item : controls_) if (item.action == Action::CloseBehavior) {
             std::wstring label = L"点击关闭按钮时：";
@@ -261,7 +270,7 @@ public:
 private:
     static constexpr wchar_t ClassName[] = L"FloatNote.GlassControlPopover";
     static constexpr UINT_PTR AnimationTimer = 41, OutsideTimer = 42, HoverTimer = 43;
-    static constexpr float HeaderHeight = 54.0f;
+    static constexpr float HeaderHeight = 60.0f;
     static constexpr std::array<const wchar_t*, 3> CloseBehaviors{L"每次询问", L"隐藏到托盘", L"退出应用"};
     struct Control {
         HWND window = nullptr;
@@ -298,6 +307,79 @@ private:
             return true;
         }
     } surface_;
+    struct Palette {
+        Gdiplus::Color surface, ink, secondary, accent, accentSoft, divider,
+                       tile, border, rail, selected, selectedInk, hover, pressed, danger, thumb, track;
+    };
+    static Palette MakePalette(bool dark, bool contrast = false) {
+        using Gdiplus::Color;
+        if (contrast) {
+            auto system = [](int index) { const auto c = GetSysColor(index);
+                return Color(255, GetRValue(c), GetGValue(c), GetBValue(c)); };
+            const auto surface = system(COLOR_WINDOW), ink = system(COLOR_WINDOWTEXT);
+            const auto accent = system(COLOR_HIGHLIGHT), selectedInk = system(COLOR_HIGHLIGHTTEXT);
+            return {surface, ink, ink, accent, surface, ink, surface, ink, surface,
+                    accent, selectedInk, accent, accent, ink, ink, ink};
+        }
+        if (dark) return {Color(255, 32, 35, 40), Color(255, 238, 240, 243), Color(255, 167, 174, 184),
+            Color(255, 139, 188, 255), Color(255, 43, 57, 77), Color(255, 58, 63, 71),
+            Color(255, 42, 46, 52), Color(255, 66, 73, 83), Color(255, 24, 27, 32),
+            Color(255, 66, 76, 92), Color(255, 238, 240, 243), Color(255, 54, 61, 73),
+            Color(255, 65, 78, 97), Color(255, 255, 146, 153), Color(255, 230, 235, 243), Color(255, 119, 131, 149)};
+        return {Color(255, 249, 249, 247), Color(255, 30, 34, 40), Color(255, 92, 100, 111),
+            Color(255, 37, 99, 194), Color(255, 231, 239, 251), Color(255, 226, 229, 232),
+            Color(255, 255, 255, 255), Color(255, 218, 222, 227), Color(255, 234, 236, 239),
+            Color(255, 255, 255, 255), Color(255, 30, 34, 40), Color(255, 236, 241, 249),
+            Color(255, 218, 230, 247), Color(255, 182, 39, 52), Color(255, 255, 255, 255), Color(255, 124, 136, 153)};
+    }
+    struct LayoutMetrics {
+        float margin, inner, tile, segment, actionsY, appearanceY, materialY, materialHeight;
+        float blurLabelY, blurY, backgroundLabelY, backgroundY, opacityLabelY, opacityY;
+        float textY, textPaletteY, fontY, behaviorY, behaviorChoicesY, footerY, height;
+        int columns;
+        bool stacked;
+    };
+    LayoutMetrics Metrics() const {
+        LayoutMetrics m{};
+        m.margin = logicalWidth_ < 224 ? 16.0f : 20.0f;
+        m.inner = std::max(1.0f, logicalWidth_ - m.margin * 2);
+        m.stacked = logicalWidth_ < 288;
+        m.tile = m.stacked ? m.inner : (m.inner - 8) / 2;
+        m.segment = m.stacked ? m.inner : m.inner / 3;
+        m.columns = std::clamp(static_cast<int>((m.inner + 2) / 40), 1, 7);
+        // Avoid a lone '+' on a second row: compact palettes balance 4 + 3.
+        if (m.columns > 4 && m.columns < 7) m.columns = 4;
+        const float paletteHeight = static_cast<float>((7 + m.columns - 1) / m.columns) * 42;
+        m.actionsY = HeaderHeight + 12;
+        m.appearanceY = m.actionsY + (m.stacked ? 88 : 40) + 16;
+        m.materialY = m.appearanceY + 26;
+        m.materialHeight = m.stacked ? 106.0f : 34.0f;
+        float y = m.materialY + m.materialHeight + 14;
+        m.blurLabelY = y;
+        m.blurY = y + 20;
+        if (state_.material == 2) y += 58;
+        m.backgroundLabelY = y;
+        m.backgroundY = y + 22;
+        m.opacityLabelY = m.backgroundY + paletteHeight + 8;
+        m.opacityY = m.opacityLabelY + 20;
+        m.textY = m.opacityY + 24 + 16;
+        m.textPaletteY = m.textY + 24;
+        m.fontY = m.textPaletteY + paletteHeight + 6;
+        m.behaviorY = m.fontY + 32 + 16;
+        m.behaviorChoicesY = m.behaviorY + 28;
+        m.footerY = m.behaviorChoicesY + (m.stacked ? 106 : 34) + 20;
+        m.height = m.footerY + 30 + 12;
+        return m;
+    }
+    Palette palette_ = MakePalette(false);
+    void RefreshAppearance() {
+        DWORD light = 1, bytes = sizeof(light);
+        RegGetValueW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize",
+                     L"AppsUseLightTheme", RRF_RT_REG_DWORD, nullptr, &light, &bytes);
+        palette_ = MakePalette(light == 0, HighContrast());
+        const BOOL dark = light == 0;
+        if (window_) DwmSetWindowAttribute(window_, static_cast<DWMWINDOWATTRIBUTE>(20), &dark, sizeof(dark));
+    }
     HINSTANCE instance_ = nullptr;
     HWND window_ = nullptr, canvas_ = nullptr, slider_ = nullptr, blurSlider_ = nullptr, anchor_ = nullptr, extraAnchor_ = nullptr, hovered_ = nullptr;
     HFONT font_ = nullptr;
@@ -309,8 +391,8 @@ private:
     State state_;
     RECT target_{}, work_{}, noteRect_{};
     UINT dpi_ = 96;
-    float scale_ = 1.0f, logicalWidth_ = 320.0f, scroll_ = 0.0f;
-    int width_ = 320, height_ = 528;
+    float scale_ = 1.0f, logicalWidth_ = 344.0f, scroll_ = 0.0f;
+    int width_ = 344, height_ = 630;
     bool useBackdrop_ = false, closing_ = false, animated_ = false, closedNotified_ = true, mouseWasDown_ = false, labelsReady_ = false, modalOpen_ = false;
     bool presenting_ = false; // Hidden panels cache state; they never submit a layered surface.
     BYTE opacity_ = 255;
@@ -321,10 +403,9 @@ private:
     float animationFrom_ = 0, animationTo_ = 1;
 
     int Px(float value) const { return static_cast<int>(std::lround(value * scale_)); }
-    float ColorsTop() const { return state_.material == 2 ? 242.0f : 180.0f; }
-    float ContentHeight() const { return ColorsTop() + 368.0f; }
-    float OpacitySliderY() const { return ColorsTop() + 152.0f; }
-    static constexpr float BlurSliderY = 202.0f;
+    float ContentHeight() const { return Metrics().height; }
+    float OpacitySliderY() const { return Metrics().opacityY; }
+    float BlurSliderY() const { return Metrics().blurY; }
     static std::wstring ColorLabel(COLORREF color) {
         wchar_t label[16]{};
         swprintf_s(label, L"#%02X%02X%02X", GetRValue(color), GetGValue(color), GetBValue(color));
@@ -342,7 +423,7 @@ private:
         return label;
     }
     void ResizeForMaterial() {
-        height_ = std::min(Px(ContentHeight()), std::max(Px(150), static_cast<int>(work_.bottom - work_.top) - Px(16)));
+        height_ = std::min(Px(ContentHeight()), std::max(1, static_cast<int>(work_.bottom - work_.top) - Px(16)));
         scroll_ = std::min(scroll_, std::max(0.0f, ContentHeight() - static_cast<float>(height_) / scale_));
         target_ = Place(noteRect_);
         SetWindowPos(window_, nullptr, target_.left, target_.top, width_, height_, SWP_NOACTIVATE | SWP_NOZORDER);
@@ -378,13 +459,14 @@ private:
         if (border.GetA()) { Gdiplus::Pen pen(border, .65f); graphics.DrawPath(&pen, &path); }
     }
     static void Text(Gdiplus::Graphics& graphics, const std::wstring& value, Gdiplus::RectF r,
-                     float size, Gdiplus::Color color, bool bold = false, bool center = false) {
+                     float size, Gdiplus::Color color, bool bold = false, bool center = false, bool right = false) {
         Gdiplus::FontFamily family(L"Microsoft YaHei UI");
         Gdiplus::Font font(&family, size, bold ? Gdiplus::FontStyleBold : Gdiplus::FontStyleRegular, Gdiplus::UnitPixel);
         Gdiplus::StringFormat format;
         format.SetFormatFlags(Gdiplus::StringFormatFlagsNoWrap);
         format.SetTrimming(Gdiplus::StringTrimmingEllipsisCharacter);
-        format.SetAlignment(center ? Gdiplus::StringAlignmentCenter : Gdiplus::StringAlignmentNear);
+        format.SetAlignment(right ? Gdiplus::StringAlignmentFar :
+                            center ? Gdiplus::StringAlignmentCenter : Gdiplus::StringAlignmentNear);
         format.SetLineAlignment(Gdiplus::StringAlignmentCenter);
         Gdiplus::SolidBrush brush(color);
         graphics.DrawString(value.c_str(), static_cast<INT>(value.size()), &font, r, &format, &brush);
@@ -403,7 +485,7 @@ private:
             }
             controls_.push_back({child, action, value, {}, fixed});
         };
-        button(Action::Close, L"完成，关闭便签控制", 0, true);
+        button(Action::Close, L"完成，关闭便签设置", 0, true);
         button(Action::ToggleTopmost, L"置顶");
         button(Action::TogglePassThrough, L"鼠标穿透");
         button(Action::MaterialLiquid, L"材质：液态玻璃");
@@ -483,51 +565,58 @@ private:
         if (font_) DeleteObject(font_);
         font_ = CreateFontW(-Px(12), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
                            OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Microsoft YaHei UI");
-        const float inner = logicalWidth_ - 36, tile = (inner - 8) / 2, segment = inner / 3;
-        const float colorsY = ColorsTop();
-        const int colorCount = std::clamp(static_cast<int>((inner + 7) / 41) - 2, 1, 5);
-        const float swatchStep = (inner - 34) / static_cast<float>(colorCount + 1);
+        const auto m = Metrics();
+        auto swatch = [&](float y, int index) {
+            const float size = std::min(40.0f, m.inner);
+            const float step = m.columns > 1 ? (m.inner - size) / (m.columns - 1) : 0;
+            return Gdiplus::RectF(m.margin + (index % m.columns) * step,
+                                 y + (index / m.columns) * 42, size, 40);
+        };
+        auto choice = [&](float y, int index) {
+            return Gdiplus::RectF(m.margin + (m.stacked ? 0 : index * m.segment),
+                                 y + (m.stacked ? index * 36 : 0), m.segment, 34);
+        };
         for (size_t i = 0; i < controls_.size(); ++i) {
             auto& control = controls_[i];
             control.visible = true;
             switch (control.action) {
-            case Action::Close: control.rectangle = {logicalWidth_ - 70, 13, 52, 30}; break;
-            case Action::ToggleTopmost: control.rectangle = {18, 60, tile, 40}; break;
-            case Action::TogglePassThrough: control.rectangle = {26 + tile, 60, tile, 40}; break;
-            case Action::MaterialLiquid: control.rectangle = {18, 134, segment, 34}; break;
-            case Action::MaterialAcrylic: control.rectangle = {18 + segment, 134, segment, 34}; break;
-            case Action::MaterialSolid: control.rectangle = {18 + 2 * segment, 134, segment, 34}; break;
-            case Action::BackgroundClear: control.rectangle = {18, colorsY + 24, 34, 34}; break;
-            case Action::BackgroundPreset:
-                control.visible = control.value < colorCount;
-                control.rectangle = {18 + (control.value + 1) * swatchStep, colorsY + 24, 34, 34}; break;
-            case Action::AddBackgroundColor: control.rectangle = {logicalWidth_ - 52, colorsY + 24, 34, 34}; break;
-            case Action::TextAutomatic: control.rectangle = {18, colorsY + 91, 34, 34}; break;
-            case Action::TextPreset:
-                control.visible = control.value < colorCount;
-                control.rectangle = {18 + (control.value + 1) * swatchStep, colorsY + 91, 34, 34}; break;
-            case Action::AddTextColor: control.rectangle = {logicalWidth_ - 52, colorsY + 91, 34, 34}; break;
-            case Action::SmallerText: control.rectangle = {logicalWidth_ - 133, colorsY + 187, 34, 32}; break;
-            case Action::LargerText: control.rectangle = {logicalWidth_ - 52, colorsY + 187, 34, 32}; break;
-            case Action::CloseBehavior: control.rectangle = {18 + control.value * segment, colorsY + 257, segment, 34}; break;
-            case Action::OpenLab: control.rectangle = {18, colorsY + 299, inner, 31}; break;
-            case Action::HideNote: control.rectangle = {18, colorsY + 334, tile, 25}; break;
-            case Action::ExitApp: control.rectangle = {26 + tile, colorsY + 334, tile, 25}; break;
+            case Action::Close: control.rectangle = {logicalWidth_ - m.margin - 54, 15, 54, 30}; break;
+            case Action::ToggleTopmost: control.rectangle = {m.margin, m.actionsY, m.tile, 40}; break;
+            case Action::TogglePassThrough: control.rectangle = {
+                m.margin + (m.stacked ? 0 : m.tile + 8), m.actionsY + (m.stacked ? 48 : 0), m.tile, 40}; break;
+            case Action::MaterialLiquid: control.rectangle = choice(m.materialY, 0); break;
+            case Action::MaterialAcrylic: control.rectangle = choice(m.materialY, 1); break;
+            case Action::MaterialSolid: control.rectangle = choice(m.materialY, 2); break;
+            case Action::BackgroundClear: control.rectangle = swatch(m.backgroundY, 0); break;
+            case Action::BackgroundPreset: control.rectangle = swatch(m.backgroundY, control.value + 1); break;
+            case Action::AddBackgroundColor: control.rectangle = swatch(m.backgroundY, 6); break;
+            case Action::TextAutomatic: control.rectangle = swatch(m.textPaletteY, 0); break;
+            case Action::TextPreset: control.rectangle = swatch(m.textPaletteY, control.value + 1); break;
+            case Action::AddTextColor: control.rectangle = swatch(m.textPaletteY, 6); break;
+            case Action::SmallerText: control.rectangle = {logicalWidth_ - m.margin - 122, m.fontY, 34, 32}; break;
+            case Action::LargerText: control.rectangle = {logicalWidth_ - m.margin - 34, m.fontY, 34, 32}; break;
+            case Action::CloseBehavior: control.rectangle = choice(m.behaviorChoicesY, control.value); break;
+            case Action::OpenLab: control.rectangle = {logicalWidth_ - m.margin - 80, m.appearanceY - 6, 80, 28}; break;
+            case Action::HideNote: control.rectangle = {m.margin, m.footerY, (m.inner - 8) / 2, 30}; break;
+            case Action::ExitApp: control.rectangle = {m.margin + (m.inner + 8) / 2, m.footerY, (m.inner - 8) / 2, 30}; break;
             default: break;
             }
             ShowWindow(control.window, control.visible ? SW_SHOWNA : SW_HIDE);
             if (!control.visible) continue;
             const auto& r = control.rectangle;
-            SetWindowPos(control.window, HWND_TOP, Px(r.X), Px(r.Y - (control.fixed ? 0 : scroll_)),
-                         Px(r.Width), Px(r.Height), SWP_NOACTIVATE);
+            const float y = r.Y - (control.fixed ? 0 : scroll_);
+            // Round shared edges, not independent widths: fractional DPI must
+            // not assign the same pixel to two adjacent segmented controls.
+            SetWindowPos(control.window, HWND_TOP, Px(r.X), Px(y),
+                         Px(r.GetRight()) - Px(r.X), Px(y + r.Height) - Px(y), SWP_NOACTIVATE);
             SendMessageW(control.window, WM_SETFONT, reinterpret_cast<WPARAM>(font_), FALSE);
             ClipControl(control.window, r, control.fixed);
         }
-        const Gdiplus::RectF sliderRect{15, OpacitySliderY(), logicalWidth_ - 30, 27};
+        const Gdiplus::RectF sliderRect{m.margin - 5, OpacitySliderY(), m.inner + 10, 24};
         SetWindowPos(slider_, HWND_TOP, Px(sliderRect.X), Px(sliderRect.Y - scroll_),
                      Px(sliderRect.Width), Px(sliderRect.Height), SWP_NOACTIVATE);
         ClipControl(slider_, sliderRect, false);
-        const Gdiplus::RectF blurRect{15, BlurSliderY, logicalWidth_ - 30, 27};
+        const Gdiplus::RectF blurRect{m.margin - 5, BlurSliderY(), m.inner + 10, 24};
         ShowWindow(blurSlider_, state_.material == 2 ? SW_SHOWNA : SW_HIDE);
         if (state_.material == 2) {
             SetWindowPos(blurSlider_, HWND_TOP, Px(blurRect.X), Px(blurRect.Y - scroll_),
@@ -553,16 +642,17 @@ private:
         const float y = rectangle.Y - (fixed ? 0 : scroll_);
         const float top = fixed ? 0 : HeaderHeight;
         const float bottom = static_cast<float>(height_) / scale_ - 6;
-        const int clipTop = Px(std::max(0.0f, top - y));
-        const int clipBottom = Px(std::clamp(bottom - y, 0.0f, rectangle.Height));
-        HRGN clip = CreateRectRgn(0, clipTop, Px(rectangle.Width), clipBottom);
+        const int height = Px(y + rectangle.Height) - Px(y);
+        const int clipTop = std::clamp(Px(top) - Px(y), 0, height);
+        const int clipBottom = std::clamp(Px(bottom) - Px(y), 0, height);
+        HRGN clip = CreateRectRgn(0, clipTop, Px(rectangle.GetRight()) - Px(rectangle.X), clipBottom);
         if (clip && !SetWindowRgn(control, clip, FALSE)) DeleteObject(clip);
         // Keep offscreen inputs in the native tab order; focusing one scrolls it
         // into view. An empty clip removes its pointer hit area.
     }
     void EnsureVisible(HWND child) {
-        if (child == slider_) { ScrollInto(OpacitySliderY(), OpacitySliderY() + 27); return; }
-        if (child == blurSlider_) { ScrollInto(BlurSliderY, BlurSliderY + 27); return; }
+        if (child == slider_) { ScrollInto(OpacitySliderY(), OpacitySliderY() + 24); return; }
+        if (child == blurSlider_) { ScrollInto(BlurSliderY(), BlurSliderY() + 24); return; }
         for (const auto& control : controls_) if (control.window == child && !control.fixed) {
             ScrollInto(control.rectangle.Y, control.rectangle.GetBottom()); return;
         }
@@ -660,41 +750,45 @@ private:
         const bool hover = hoverAmount > 0.04f;
         const bool pressed = (SendMessageW(item.window, BM_GETSTATE, 0, 0) & BST_PUSHED) != 0;
         const bool selected = Selected(item);
-        const Color ink(255, 31, 35, 43), blue(255, 30, 105, 215), secondary(255, 100, 107, 117);
+        const auto& p = palette_;
+        const auto ink = p.ink, blue = p.accent, secondary = p.secondary;
         const bool swatch = item.action == Action::BackgroundClear || item.action == Action::BackgroundPreset ||
                             item.action == Action::TextAutomatic || item.action == Action::TextPreset ||
                             item.action == Action::AddBackgroundColor || item.action == Action::AddTextColor;
         if (pressed) { r.Inflate(-.8f, -.8f); }
         if (swatch) {
-            RectF disc(r.X + 3, r.Y + 3, r.Width - 6, r.Height - 6);
+            RectF disc(r.X + 4, r.Y + 4, r.Width - 8, r.Height - 8);
             const bool add = item.action == Action::AddBackgroundColor || item.action == Action::AddTextColor;
-            COLORREF color = RGB(250, 251, 252);
+            COLORREF color = RGB(p.tile.GetR(), p.tile.GetG(), p.tile.GetB());
             if (item.action == Action::BackgroundPreset) color = state_.backgroundColors[item.value];
             if (item.action == Action::TextPreset) color = state_.textColors[item.value];
             // The add target lives directly on the same panel material as the
             // palette. Its center has no independently filled section/card.
-            Round(graphics, disc, disc.Width / 2, add ? Color(static_cast<BYTE>(std::lround(24 * hoverAmount)), 45, 105, 185) :
-                Color(255, GetRValue(color), GetGValue(color), GetBValue(color)), Color(65, 80, 88, 100));
+            Round(graphics, disc, disc.Width / 2,
+                add ? Color(static_cast<BYTE>(std::lround(70 * hoverAmount)), blue.GetR(), blue.GetG(), blue.GetB()) :
+                Color(255, GetRValue(color), GetGValue(color), GetBValue(color)), p.border);
             if (add) {
                 Pen plus(FadeColor(secondary, blue, hoverAmount), 1.5f); plus.SetStartCap(LineCapRound); plus.SetEndCap(LineCapRound);
                 const float cx = disc.X + disc.Width / 2, cy = disc.Y + disc.Height / 2;
                 graphics.DrawLine(&plus, cx - 5, cy, cx + 5, cy);
                 graphics.DrawLine(&plus, cx, cy - 5, cx, cy + 5);
             } else if (item.action == Action::BackgroundClear) {
-                Pen slash(Color(255, 139, 148, 158), 1.1f);
+                Pen slash(secondary, 1.15f);
                 graphics.DrawLine(&slash, disc.X + 5, disc.GetBottom() - 5, disc.GetRight() - 5, disc.Y + 5);
-            } else if (item.action == Action::TextAutomatic) Text(graphics, L"A", disc, 13, ink, true, true);
+            } else if (item.action == Action::TextAutomatic) Text(graphics, L"A", disc, 13.5f, ink, true, true);
             if (selected || hover || pressed) {
-                Pen outline(selected ? blue : Color(static_cast<BYTE>(std::lround(90 * std::max(hoverAmount, pressed ? 1.0f : 0.0f))), 90, 110, 135), selected ? 1.8f : 1.0f);
-                graphics.DrawEllipse(&outline, r.X + .8f, r.Y + .8f, r.Width - 1.6f, r.Height - 1.6f);
+                Pen outline(selected ? blue : FadeColor(p.border, blue, std::max(hoverAmount, pressed ? 1.0f : 0.0f)),
+                            selected ? 1.8f : 1.0f);
+                graphics.DrawEllipse(&outline, r.X + 1, r.Y + 1, r.Width - 2, r.Height - 2);
             }
         } else if (item.action == Action::ToggleTopmost || item.action == Action::TogglePassThrough) {
-            Round(graphics, r, 11, selected ? Color(235, 222, 236, 255) : Color(150, 255, 255, 255),
-                  selected ? Color(100, 92, 149, 234) : Color(35, 90, 100, 113));
+            Round(graphics, r, 11, pressed ? p.pressed :
+                  FadeColor(selected ? p.accentSoft : p.tile, p.hover, hoverAmount * .65f),
+                  selected ? FadeColor(p.border, blue, .35f) : p.border);
             const Color icon = selected ? blue : secondary;
             Pen line(icon, 1.55f); line.SetStartCap(LineCapRound); line.SetEndCap(LineCapRound); line.SetLineJoin(LineJoinRound);
             const bool showIcon = r.Width >= 115;
-            const float x = r.X + 16, y = r.Y + 19;
+            const float x = r.X + 17, y = r.Y + r.Height / 2;
             if (showIcon && item.action == Action::ToggleTopmost) {
                 graphics.DrawLine(&line, x - 5, y - 6, x + 5, y - 6);
                 graphics.DrawLine(&line, x - 3, y - 6, x - 3, y);
@@ -707,24 +801,20 @@ private:
                 const PointF points[]{{x - 5, y - 7}, {x - 5, y + 8}, {x - 1, y + 4}, {x + 3, y + 10}, {x + 6, y + 8}, {x + 2, y + 2}, {x + 8, y + 2}};
                 graphics.DrawPolygon(&line, points, 7);
             }
-            const float inset = showIcon ? 31.0f : 10.0f;
+            const float inset = showIcon ? 33.0f : 10.0f;
             Text(graphics, item.action == Action::ToggleTopmost ? L"置顶" : L"鼠标穿透",
-                 {r.X + inset, r.Y, r.Width - inset - 27, r.Height}, showIcon ? 11.0f : 9.8f, ink, true);
-            Text(graphics, selected ? L"开" : L"关", {r.GetRight() - 28, r.Y, 23, r.Height}, 10, selected ? blue : secondary, false, true);
-            if (hoverAmount > 0.01f)
-                Round(graphics, r, 11, Color(static_cast<BYTE>(std::lround(28 * hoverAmount)), 45, 105, 185));
-            if (pressed)
-                Round(graphics, r, 11, Color(78, 45, 105, 185));
+                 {r.X + inset, r.Y, r.Width - inset - 27, r.Height}, 11.5f, ink, true);
+            Text(graphics, selected ? L"开" : L"关", {r.GetRight() - 28, r.Y, 23, r.Height}, 10.5f,
+                 selected ? blue : secondary, false, true);
         } else if (item.action == Action::MaterialLiquid || item.action == Action::MaterialAcrylic ||
                    item.action == Action::MaterialSolid || item.action == Action::CloseBehavior) {
-            if (selected) { r.Inflate(-2, -3); Round(graphics, r, 9, Color(255, 255, 255, 255), Color(28, 80, 90, 105)); }
-            else if (pressed) Round(graphics, r, 9, Color(168, 198, 214, 234));
+            if (selected) { r.Inflate(-2, -3); Round(graphics, r, 9, p.selected, p.border); }
+            else if (pressed) Round(graphics, r, 9, p.pressed);
             else if (hoverAmount > 0.01f)
-                Round(graphics, r, 9, Color(static_cast<BYTE>(std::lround(96 * hoverAmount)), 255, 255, 255));
+                Round(graphics, r, 9, FadeColor(p.rail, p.hover, hoverAmount));
             const wchar_t* label = item.action == Action::CloseBehavior ? CloseBehaviors[item.value] :
                 item.action == Action::MaterialLiquid ? L"液态玻璃" : item.action == Action::MaterialAcrylic ? L"毛玻璃" : L"纯色";
-            const float size = item.action == Action::CloseBehavior && logicalWidth_ < 280 ? 10.0f : 11.5f;
-            Text(graphics, label, r, size, selected ? ink : secondary, selected, true);
+            Text(graphics, label, r, 11.5f, selected ? p.selectedInk : secondary, selected, true);
         } else {
             std::wstring label;
             Color color = ink;
@@ -732,24 +822,25 @@ private:
             case Action::Close: label = L"完成"; color = blue; break;
             case Action::SmallerText: label = L"A−"; break;
             case Action::LargerText: label = L"A+"; break;
-            case Action::OpenLab: label = L"材质实验"; color = blue; break;
+            case Action::OpenLab: label = L"材质实验 ↗"; color = secondary; break;
             case Action::HideNote: label = L"隐藏便签"; color = secondary; break;
             case Action::ExitApp: label = L"退出"; color = secondary; break;
             default: break;
             }
             const bool tile = item.action == Action::SmallerText || item.action == Action::LargerText;
-            const Color idle(tile ? 155 : 0, 255, 255, 255);
-            const Color hot(150, 214, 226, 242);
-            const Color down(215, 168, 190, 220);
-            if (tile || hoverAmount > 0.01f || pressed)
-                Round(graphics, r, 10, pressed ? down : FadeColor(idle, hot, hoverAmount),
-                      tile ? Color(28, 90, 100, 115) : Color(0, 0, 0, 0));
+            const bool done = item.action == Action::Close;
+            const Color idle = done ? p.accentSoft : tile ? p.tile : Color(0, 0, 0, 0);
+            if (tile || done || hoverAmount > 0.01f || pressed)
+                Round(graphics, r, 9, pressed ? p.pressed : FadeColor(idle, p.hover, hoverAmount),
+                      tile ? p.border : Color(0, 0, 0, 0));
+            if (item.action == Action::ExitApp) color = FadeColor(secondary, p.danger, hoverAmount);
             Text(graphics, label, r, item.action == Action::Close ? 12.0f : 11.5f, color,
                  item.action == Action::Close, true);
         }
         if (GetFocus() == item.window) {
-            GraphicsPath path; Path(path, item.rectangle, swatch ? 17.0f : 10.0f);
-            Pen focus(Color(220, 44, 112, 222), 1.2f); focus.SetDashStyle(DashStyleDot);
+            auto focusRect = item.rectangle; focusRect.Inflate(-1, -1);
+            GraphicsPath path; Path(path, focusRect, swatch ? 19.0f : 9.0f);
+            Pen focus(blue, 1.5f);
             graphics.DrawPath(&focus, &path);
         }
     }
@@ -761,16 +852,23 @@ private:
         RECT channel{}, thumb{};
         SendMessageW(slider, TBM_GETCHANNELRECT, 0, reinterpret_cast<LPARAM>(&channel));
         SendMessageW(slider, TBM_GETTHUMBRECT, 0, reinterpret_cast<LPARAM>(&thumb));
-        const float left = 15 + static_cast<float>(channel.left) / scale_;
-        const float right = 15 + static_cast<float>(channel.right) / scale_;
+        const auto& p = palette_;
+        const float x = Metrics().margin - 5;
+        const float left = x + static_cast<float>(channel.left) / scale_;
+        const float right = x + static_cast<float>(channel.right) / scale_;
         const float cy = y + static_cast<float>(thumb.top + thumb.bottom) / (2 * scale_);
-        const float tx = 15 + static_cast<float>(thumb.left + thumb.right) / (2 * scale_);
-        Round(graphics, {left, cy - 2, std::max(1.0f, right - left), 4}, 2, Color(65, 132, 143, 162));
-        if (tx > left) Round(graphics, {left, cy - 2, tx - left, 4}, 2, Color(255, 65, 121, 218));
-        Round(graphics, {tx - 7, cy - 6.5f, 14, 14}, 7, Color(40, 52, 60, 76));
-        Round(graphics, {tx - 7, cy - 7.5f, 14, 14}, 7, Color(255, 255, 255, 255), Color(45, 75, 88, 106));
+        const float tx = x + static_cast<float>(thumb.left + thumb.right) / (2 * scale_);
+        Round(graphics, {left, cy - 1.5f, std::max(1.0f, right - left), 3}, 1.5f, p.track);
+        if (tx > left) Round(graphics, {left, cy - 1.5f, tx - left, 3}, 1.5f, p.accent);
+        const float hover = std::max(HoverAmount(slider), GetCapture() == slider ? 1.0f : 0.0f);
+        const float radius = 7 + .7f * hover;
+        if (hover > .01f) Round(graphics, {tx - 11, cy - 11, 22, 22}, 11,
+            Color(static_cast<BYTE>(std::lround(36 * hover)), p.accent.GetR(), p.accent.GetG(), p.accent.GetB()));
+        Round(graphics, {tx - radius, cy - radius + 1, radius * 2, radius * 2}, radius, Color(24, 0, 0, 0));
+        Round(graphics, {tx - radius, cy - radius, radius * 2, radius * 2}, radius, p.thumb,
+              FadeColor(p.track, p.accent, hover));
         if (GetFocus() == slider) {
-            Pen focus(Color(230, 44, 112, 222), 1.1f);
+            Pen focus(p.accent, 1.5f);
             graphics.DrawEllipse(&focus, tx - 9, cy - 9.5f, 18.0f, 18.0f);
         }
     }
@@ -787,38 +885,55 @@ private:
             graphics.SetTextRenderingHint(TextRenderingHintAntiAliasGridFit);
             graphics.ScaleTransform(scale_, scale_);
             const float h = static_cast<float>(height_) / scale_;
+            const auto m = Metrics();
+            const auto& p = palette_;
             Round(graphics, {.5f, .5f, logicalWidth_ - 1, h - 1}, 19.5f,
-                  Color(useBackdrop_ ? 227 : 255, 244, 246, 249), Color(170, 255, 255, 255));
-            const Color ink(255, 31, 35, 43), secondary(255, 103, 111, 123);
+                  Color(useBackdrop_ ? 245 : 255, p.surface.GetR(), p.surface.GetG(), p.surface.GetB()), p.border);
+            auto section = [&](const wchar_t* label, float y, const std::wstring& detail = L"") {
+                Text(graphics, label, {m.margin, y, 48, 20}, 11.5f, p.ink, true);
+                if (!detail.empty()) Text(graphics, detail,
+                    {m.margin + 50, y, m.inner - 50, 20}, 10.5f, p.secondary, false, false, true);
+            };
             const auto body = graphics.Save();
             graphics.SetClip(RectF(5, HeaderHeight, logicalWidth_ - 10, h - HeaderHeight - 6));
             graphics.TranslateTransform(0, -scroll_);
-            const float colorsY = ColorsTop();
-            Round(graphics, {18, 134, logicalWidth_ - 36, 34}, 11, Color(30, 109, 121, 141));
-            Round(graphics, {18, colorsY + 257, logicalWidth_ - 36, 34}, 11, Color(30, 109, 121, 141));
-            Text(graphics, L"材质", {18, 108, logicalWidth_ - 36, 22}, 10.5f, secondary, true);
+            Round(graphics, {m.margin, m.materialY, m.inner, m.materialHeight}, 11, p.rail);
+            Round(graphics, {m.margin, m.behaviorChoicesY, m.inner, m.stacked ? 106.0f : 34.0f}, 11, p.rail);
+            section(L"外观", m.appearanceY);
             if (state_.material == 2) {
-                Text(graphics, L"模糊强度", {18, 180, logicalWidth_ - 104, 21}, 10.5f, secondary, true);
-                Text(graphics, BlurLabel(), {logicalWidth_ - 68, 180, 50, 21}, 10.5f, secondary, false, true);
-                DrawSlider(graphics, blurSlider_, BlurSliderY);
+                Text(graphics, L"模糊强度", {m.margin, m.blurLabelY, m.inner - 60, 20}, 11.5f, p.secondary);
+                Text(graphics, BlurLabel(), {logicalWidth_ - m.margin - 50, m.blurLabelY, 50, 20},
+                     11, p.secondary, false, false, true);
+                DrawSlider(graphics, blurSlider_, BlurSliderY());
             }
-            Text(graphics, L"背景颜色", {18, colorsY, logicalWidth_ - 36, 21}, 10.5f, secondary, true);
-            Text(graphics, L"文字颜色", {18, colorsY + 67, logicalWidth_ - 36, 21}, 10.5f, secondary, true);
-            Text(graphics, L"背景遮色", {18, colorsY + 130, logicalWidth_ - 104, 21}, 10.5f, secondary, true);
-            Text(graphics, std::to_wstring(state_.opacity) + L"%", {logicalWidth_ - 68, colorsY + 130, 50, 21}, 10.5f, secondary, false, true);
-            Text(graphics, L"字号", {18, colorsY + 187, logicalWidth_ - 155, 32}, 11.5f, ink);
-            Text(graphics, std::to_wstring(state_.fontSize), {logicalWidth_ - 99, colorsY + 187, 47, 32}, 12, ink, false, true);
-            Text(graphics, L"点击关闭按钮时", {18, colorsY + 231, logicalWidth_ - 36, 22}, 10.5f, secondary, true);
+            Text(graphics, L"背景颜色", {m.margin, m.backgroundLabelY, m.inner - 60, 20}, 11.5f, p.secondary);
+            if (state_.opacity == 0) Text(graphics, L"透明",
+                {logicalWidth_ - m.margin - 50, m.backgroundLabelY, 50, 20}, 10.5f, p.secondary, false, false, true);
+            Text(graphics, L"背景遮色", {m.margin, m.opacityLabelY, m.inner - 60, 20}, 11.5f, p.secondary);
+            Text(graphics, std::to_wstring(state_.opacity) + L"%",
+                {logicalWidth_ - m.margin - 50, m.opacityLabelY, 50, 20}, 11, p.secondary, false, false, true);
+            section(L"文字", m.textY, state_.autoText ? L"自动适应背景" : L"自选颜色");
+            Text(graphics, L"字号", {m.margin, m.fontY, m.inner - 132, 32}, 11.5f, p.secondary);
+            Text(graphics, std::to_wstring(state_.fontSize) + L" pt",
+                {logicalWidth_ - m.margin - 88, m.fontY, 54, 32}, 11.5f, p.ink, false, true);
+            section(L"行为", m.behaviorY, L"关闭便签时");
+            Pen divider(p.divider, .7f);
+            for (const float y : {m.textY - 8, m.behaviorY - 8, m.footerY - 10})
+                graphics.DrawLine(&divider, m.margin, y, logicalWidth_ - m.margin, y);
             DrawSlider(graphics, slider_, OpacitySliderY());
             for (const auto& control : controls_) if (!control.fixed && control.visible) DrawControl(graphics, control);
             graphics.Restore(body);
-            Text(graphics, L"便签控制", {18, 10, logicalWidth_ - 96, 36}, 15, ink, true);
+            Text(graphics, L"便签设置", {m.margin, 8, m.inner - 68, 28}, 16, p.ink, true);
+            Text(graphics, L"即刻生效", {m.margin, 35, m.inner - 68, 18}, 10.5f, p.secondary);
+            Pen headerLine(p.divider, .7f);
+            graphics.DrawLine(&headerLine, m.margin, HeaderHeight, logicalWidth_ - m.margin, HeaderHeight);
             for (const auto& control : controls_) if (control.fixed) DrawControl(graphics, control);
             if (ContentHeight() > h) {
                 const float rail = h - HeaderHeight - 20, maximum = ContentHeight() - h;
                 const float length = std::max(24.0f, rail * (h - HeaderHeight) / (ContentHeight() - HeaderHeight));
                 const float y = HeaderHeight + 8 + (rail - length) * scroll_ / maximum;
-                Round(graphics, {logicalWidth_ - 6, y, 2.5f, length}, 1.25f, Color(75, 100, 111, 128));
+                Round(graphics, {logicalWidth_ - 6, y, 2.5f, length}, 1.25f,
+                      Color(140, p.secondary.GetR(), p.secondary.GetG(), p.secondary.GetB()));
             }
         }
         POINT source{0, 0};
@@ -849,7 +964,7 @@ private:
         }
     }
     void TickAnimation() {
-        const float duration = closing_ ? 170.0f : 210.0f;
+        const float duration = closing_ ? 140.0f : 180.0f;
         const float time = animated_ ? std::clamp(static_cast<float>(GetTickCount64() - animationStart_) / duration, 0.0f, 1.0f) : 1.0f;
         const float eased = 1 - std::pow(1 - time, 3.0f);
         const float progress = animationFrom_ + (animationTo_ - animationFrom_) * eased;
@@ -948,6 +1063,7 @@ private:
         case WM_HSCROLL:
             if (reinterpret_cast<HWND>(lp) == self->slider_) {
                 self->state_.opacity = static_cast<int>(SendMessageW(self->slider_, TBM_GETPOS, 0, 0));
+                self->labelsReady_ = false;
                 const int value = self->state_.opacity;
                 SetWindowTextW(self->slider_, (L"背景遮色，" + std::to_wstring(value) + L"%").c_str());
                 self->Render();
@@ -983,6 +1099,37 @@ private:
         case WM_CLOSE: if (!self->modalOpen_) self->RequestClose(); return 0;
         case WM_SIZE:
             if (self->canvas_) self->backdrop_.Resize(LOWORD(lp), HIWORD(lp));
+            return 0;
+        case WM_DPICHANGED:
+            if (self->presenting_) {
+                self->dpi_ = HIWORD(wp);
+                self->scale_ = static_cast<float>(self->dpi_) / 96.0f;
+                const auto* suggested = reinterpret_cast<const RECT*>(lp);
+                MONITORINFO monitor{sizeof(monitor)};
+                if (suggested && GetMonitorInfoW(MonitorFromRect(suggested, MONITOR_DEFAULTTONEAREST), &monitor))
+                    self->work_ = monitor.rcWork;
+                self->width_ = std::min(self->Px(344), std::max(1,
+                    static_cast<int>(self->work_.right - self->work_.left) - self->Px(16)));
+                self->logicalWidth_ = static_cast<float>(self->width_) / self->scale_;
+                self->ResizeForMaterial();
+                self->Render();
+            }
+            return 0;
+        case WM_SETTINGCHANGE:
+        case WM_THEMECHANGED:
+            self->RefreshAppearance();
+            if (self->presenting_) {
+                BOOL animations = TRUE;
+                SystemParametersInfoW(SPI_GETCLIENTAREAANIMATION, 0, &animations, 0);
+                self->animated_ = animations != FALSE && !self->HighContrast();
+                if (!self->animated_) {
+                    KillTimer(window, HoverTimer);
+                    self->hoverCurrent_ = {self->hovered_, self->hovered_ ? 1.0f : 0.0f};
+                    self->hoverPrevious_ = {};
+                }
+                self->ResizeForMaterial();
+                self->Render();
+            }
             return 0;
         case WM_DESTROY:
             KillTimer(window, AnimationTimer); KillTimer(window, OutsideTimer); return 0;

@@ -1,11 +1,14 @@
-# FloatNote 2.2.1
+# FloatNote 2.3.0
 
-本版修复文字绘制边界、编辑点击和控制卡片外圈，并改善设置面板的动画与操作反馈。
+本版整理桌面界面的排版与操作层级，让设置更清晰，并改善浅深色主题、小屏幕和高 DPI 下的使用体验。
 
-- **文字与保存**：保留原有自动字色行为，限制字形遮罩读取范围，防止有边框或滚动条时越界；按实际读取长度保存，避免空字符填充和转换失败覆盖笔记。
-- **编辑体验**：编辑时点击空格、行尾和空行可以定位光标；正文下方的空白仍可拖动便签。保留 Markdown 预览、中文输入及撤销。
-- **设置面板**：修复系统圆角与自绘圆角叠加形成的外圈；改善淡入淡出、悬停和按下反馈，减少滑块闪烁，处理动画中途关闭及悬停状态清理。
-- **外观规则**：保留黑白控制片与红色关闭反馈。此次未扩展背景采样范围：液态玻璃自动字色按背景采样，其余材质沿用原主题底色规则。
+- **设置分组**：按“外观／文字／行为”组织选项，统一间距、字号、选中状态与键盘焦点反馈。
+- **系统外观**：设置面板跟随 Windows 浅色、深色主题，并使用系统高对比度配色。滑块和数值更容易辨识。
+- **小屏幕与 DPI**：完整保留预设颜色，窄面板自动换行；较短的工作区可滚动，标题与“完成”保持可用。打开的面板可随显示器 DPI 变化重新布局。
+- **正文与动效**：较大便签逐渐增加留白，小便签保持文字空间；细化悬停、按下和展开反馈，继续遵守系统关闭动画的设置。
+- **交互可靠性**：修复像素取整导致的分段按钮点击范围重叠，增加原生布局、键盘导航、对比度和 DPI 回归检查。
+
+现有液态玻璃、自动文字颜色、Markdown 预览、中文输入与撤销行为继续保留。
 
 ## 下载与升级
 
@@ -19,12 +22,15 @@
 
 ## English
 
-This update fixes text-composition boundaries, editing hit targets and the extra outline around the settings panel, while improving interface feedback.
+This update clarifies the desktop interface and settings hierarchy, with improved light/dark appearance, small-display layouts and high-DPI behavior.
 
-- **Text and persistence**: retain automatic ink behavior and bound glyph-mask reads to prevent out-of-bounds access with editor borders or scrollbars. Save only the characters actually read and protect existing notes from failed reads or conversions.
-- **Editing**: spaces, line endings and blank lines accept caret placement; blank space below the text still drags the note. Markdown preview, native IME input and undo remain available.
-- **Settings**: remove overlapping system/custom rounded outlines, smooth panel and hover transitions, strengthen pressed feedback, reduce slider flicker, and handle interrupted transitions and hover cleanup.
-- **Appearance**: retain monochrome controls and red close-hover feedback. Background-sampling scope is unchanged: liquid-glass Auto ink samples its background; other materials retain theme-based Auto color.
+- **Organized settings**: appearance, text and behavior groups share consistent spacing, typography, selection states and keyboard focus feedback.
+- **Windows appearance**: settings follow the light/dark theme and use system High Contrast colors. Sliders and values are easier to distinguish.
+- **Small displays and DPI**: all preset colors remain available through wrapping; short work areas scroll below a fixed header and Done action. An open panel reflows when its monitor DPI changes.
+- **Text and motion**: larger notes gain gradual breathing room while small notes retain their text space. Hover, pressed and panel transitions are refined, respecting disabled system animations.
+- **Reliable interaction**: consistent pixel rounding prevents overlapping segmented-button hit targets. Native layout, keyboard navigation, contrast and DPI checks cover the interface.
+
+Liquid glass, automatic ink, Markdown preview, native IME input and undo remain available.
 
 Download a ZIP from Assets: **x64 for most PCs**, arm64 for Windows on ARM, or x86 for 32-bit environments. Extract and run `FloatNote.exe`; no additional runtime is required.
 

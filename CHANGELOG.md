@@ -2,6 +2,26 @@
 
 All notable changes are documented here. FloatNote follows [Semantic Versioning](https://semver.org/).
 
+## [2.3.0] - 2026-10-01
+
+### Added
+
+- Settings follow Windows light/dark appearance and system High Contrast colors.
+- Hidden native settings-layout coverage for complete palettes, keyboard navigation, contrast and DPI changes.
+
+### Improved
+
+- Group settings into appearance, text and behavior with consistent spacing, typography, selection and focus feedback.
+- Wrap every saved color and stack longer choices on narrow work areas; keep the header available while scrolling.
+- Add gradual breathing room to larger notes while retaining the usable text height of small and shallow notes.
+- Make sliders easier to see, refine hover/pressed feedback, and shorten panel transitions while honoring disabled motion.
+
+### Fixed
+
+- Round shared control edges consistently to prevent overlapping native hit targets.
+- Reflow an open settings panel when its monitor DPI changes and refresh its appearance when Windows settings change.
+- Announce selected materials and colors through native accessible control names.
+
 ## [2.2.1] - 2026-09-28
 
 ### Fixed

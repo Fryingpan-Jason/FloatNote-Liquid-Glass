@@ -366,7 +366,7 @@ private:
     HWND window_ = nullptr;
     HWND closeWindow_ = nullptr;
     ULONG_PTR graphicsToken_ = 0;
-    std::wstring label_ = L"便签控制";
+    std::wstring label_ = L"便签设置";
     std::wstring closeLabel_ = L"关闭便签";
     std::function<void()> onToggle_;
     std::function<void(int, int)> onDragEnd_;

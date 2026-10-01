@@ -6,7 +6,7 @@ English · [简体中文](README.md)
 
 ![FloatNote on the desktop](docs/media/desktop.webp)
 
-> Recorded from a local development build. The visual and interaction improvements shown are included in v2.1.0.
+> Desktop and motion examples were recorded from a local v2.1.0 development build; settings images show native v2.3.0 rendering.
 
 **[Download the latest release](https://github.com/Fryingpan-Jason/FloatNote-Liquid-Glass/releases/latest)** · [Liquid Glass implementation](docs/WINDOWS_LIQUID_GLASS.md)
 
@@ -23,9 +23,11 @@ Shrink the note vertically into a compact bar; click to restore. This GIF plays 
 <details>
 <summary>Appearance settings</summary>
 
-Liquid glass, frosted glass or solid backgrounds, with color, font size, blur, pinning and click-through controls.
+Liquid glass, frosted glass or solid backgrounds, with color, font size, blur, pinning and click-through controls. Settings follow the Windows light/dark theme and keep every option reachable on smaller displays.
 
-![Appearance settings](docs/media/settings.webp)
+![Light settings](docs/media/settings-light.png)
+
+![Dark settings](docs/media/settings-dark.png)
 
 </details>
 

@@ -1088,7 +1088,7 @@ void ShowTrayMenu(POINT position) {
 #endif
     };
 #ifdef FLOATNOTE_GLASS_LAB
-    AppendMenuW(menu,MF_STRING,kControlPill,L"便签控制…");
+    AppendMenuW(menu,MF_STRING,kControlPill,L"便签设置…");
 #endif
     const auto editLabel = shortcut(Text().editNow, L"Ctrl+Alt+E");
     const auto passLabel = shortcut(Text().passThrough, L"Ctrl+Alt+P");
