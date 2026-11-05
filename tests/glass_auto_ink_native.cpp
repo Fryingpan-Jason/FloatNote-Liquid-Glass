@@ -35,11 +35,12 @@ struct GlassAutoInkTest {
         Check(afterStart==beforeStart&&afterEnd==beforeEnd&&SendMessageW(g_edit,EM_CANUNDO,0,0),"ink update disturbed native selection/undo");
         g_settings.autoTextColor=false;g_settings.textColor=RGB(230,20,80);SyncAdaptiveInk();Check(kNoteText==g_settings.textColor,"manual ink overridden");
         g_settings.autoTextColor=true;g_settings.opacityPercent=100;Seed();SyncAdaptiveInk();Check(kNoteText==kText,"opaque tint did not use existing Auto");
-        g_settings.opacityPercent=50;Seed();g_backdrop.mode=1;SyncAdaptiveInk();Check(kNoteText==kText,"frosted Auto changed");
+        g_settings.opacityPercent=50;Seed();g_backdrop.mode=1;SyncAdaptiveInk();Sleep(200);SyncAdaptiveInk();
+        Check(kNoteText==GlassAutoInk::Light,"blurred GPU background did not select white");
         Seed();g_highContrast=true;kText=RGB(255,255,0);SyncAdaptiveInk();Check(kNoteText==kText,"high contrast overridden");
         g_highContrast=false;Seed();g_backdrop.failed=true;SyncAdaptiveInk();Check(kNoteText==kText,"renderer failure did not retain theme fallback");
         g_backdrop.enabled=false;KillTimer(g_window,82);DestroyWindow(g_window);g_window=g_edit=nullptr;
-        std::puts("PASS native Auto, manual colour, opaque tint, frosted mode, high contrast, renderer fallback, separate settings colours, selection and undo.");
+        std::puts("PASS native Auto, manual colour, opaque tint, GPU blur mode, high contrast, renderer fallback, separate settings colours, selection and undo.");
     }
 };
 int main(){try{GlassAutoInkTest::Run();return 0;}catch(const std::exception& e){std::fprintf(stderr,"%s\n",e.what());return 1;}}

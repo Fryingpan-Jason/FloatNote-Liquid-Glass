@@ -680,7 +680,7 @@ public:
             inkEnabled=requested;inkTint=tint;inkAlpha=alpha;++inkGeneration;
             inkDirty=true;inkDecision.Reset(fallbackWhite);
         }
-        if(!inkEnabled || mode!=2 || !enabled || failed || inkUnavailable || !haveDesktop || !inkFrameValid)return -1;
+        if(!inkEnabled || mode<=0 || !enabled || failed || inkUnavailable || !haveDesktop || !inkFrameValid)return -1;
         if(presentationMotion)return inkDecision.valid?int(inkDecision.white):-1;
         const double now=GlassClockMs();
         if(inkPending) {

@@ -30,6 +30,31 @@ inline double WhiteShare(const void* data,unsigned pitch,int width,int height,CO
     }
     return width>0 && height>0 ? double(white)/(double(width)*height) : .5;
 }
+// Sample the composed note without changing its capture affinity. This includes
+// the system backdrop and tint as they are actually presented on the desktop.
+inline bool ScreenWhiteShare(RECT rect,double& share) {
+    if(rect.right<=rect.left || rect.bottom<=rect.top)return false;
+    HDC screen=GetDC(nullptr);if(!screen)return false;
+    HDC memory=CreateCompatibleDC(screen);
+    BITMAPINFO info{};info.bmiHeader.biSize=sizeof(BITMAPINFOHEADER);
+    info.bmiHeader.biWidth=32;info.bmiHeader.biHeight=-16;info.bmiHeader.biPlanes=1;
+    info.bmiHeader.biBitCount=32;info.bmiHeader.biCompression=BI_RGB;
+    void* pixels=nullptr;
+    HBITMAP bitmap=memory?CreateDIBSection(screen,&info,DIB_RGB_COLORS,&pixels,nullptr,0):nullptr;
+    bool ok=false;
+    if(bitmap && pixels) {
+        HGDIOBJ old=SelectObject(memory,bitmap);
+        SetStretchBltMode(memory,COLORONCOLOR);
+        ok=StretchBlt(memory,0,0,32,16,screen,rect.left,rect.top,
+                      rect.right-rect.left,rect.bottom-rect.top,SRCCOPY|CAPTUREBLT)!=FALSE;
+        if(ok){GdiFlush();share=WhiteShare(pixels,32*4,32,16,0,0);}
+        SelectObject(memory,old);
+    }
+    if(bitmap)DeleteObject(bitmap);
+    if(memory)DeleteDC(memory);
+    ReleaseDC(nullptr,screen);
+    return ok;
+}
 struct Decision {
     bool white=false,valid=false,pending=false,candidate=false;
     double candidateAt=0;

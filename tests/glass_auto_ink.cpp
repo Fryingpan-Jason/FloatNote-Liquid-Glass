@@ -50,7 +50,7 @@ struct GlassAutoInkTest {
         Fresh(f,1);f.g.adaptiveContrast=false;f.g.inkFrame.response[1]=0;
         Require(Wait(f,RGB(255,255,255),0)==1,"ink depends on contour switch");
         Fresh(f,0);Require(Wait(f,RGB(0,0,0),240)==1,"GPU probe tint composition broken");
-        f.g.mode=1;Require(f.g.UpdateAutoInk(true,0,0,false)==-1,"frosted mode did not fall back");f.g.mode=2;
+        f.g.mode=0;Require(f.g.UpdateAutoInk(true,0,0,false)==-1,"system backdrop did not fall back");f.g.mode=2;
         f.g.failed=true;Require(f.g.UpdateAutoInk(true,0,0,false)==-1,"capture failure did not fall back");f.g.failed=false;
         // Region priority: most of the note is white, but the text rectangle is
         // over black. Use a large raw patch so the test shares real optics.

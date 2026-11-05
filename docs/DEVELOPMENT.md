@@ -22,6 +22,7 @@ For the liquid-glass renderer, source map and adaptation boundaries, start with 
 - `tests/glass_popover_layout.cpp` — hidden native settings layouts, complete palettes, keyboard reachability, light/dark contrast and DPI changes.
 - `tests/integration.cpp` — focused compositor and interaction checks that open temporary windows.
 - `tests/visuals.cpp` — shadow, tint, text antialiasing, custom text color, and settings screenshot checks.
+- `tests/screen_auto_ink.cpp` — interactive screen sampling and capture-affinity checks for solid and system backdrop modes.
 - `tests/visual_test_support.h` — shared fixtures and compositor capture helpers.
 - `build.ps1` — MSVC discovery and x64/x86/ARM64 builds.
 - `scripts/package.ps1` — portable release archive creation.
@@ -39,9 +40,12 @@ The default test source is `tests/regression.cpp`. A focused source can be selec
 ```powershell
 .\build.ps1 -Test -SourceFile tests\integration.cpp -OutputDirectory build\integration
 .\build.ps1 -Test -SourceFile tests\visuals.cpp -OutputDirectory build\visuals
+.\build.ps1 -Test -SourceFile tests\screen_auto_ink.cpp -OutputDirectory build\screen-auto-ink
 ```
 
 The integration test opens visible fixture windows and writes screenshots under its isolated output directory. Do not point tests at a user's portable `data` directory.
+
+The screen auto-ink test opens a visible fixture and requires an unobscured interactive desktop. The system backdrop and solid modes sample the presented screen locally without changing capture affinity; occluding windows or protected screen content can affect the sampled result.
 
 Run the visual checks in an interactive Windows 11 desktop with transparency effects enabled. They require a desktop large enough to display the 800 × 500 fixture and are not part of headless CI. They use synthetic note text; keep their generated screenshots and data out of source control.
 

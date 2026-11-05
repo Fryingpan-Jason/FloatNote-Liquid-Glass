@@ -645,14 +645,20 @@ void RequestRender() {
 }
 
 #ifdef FLOATNOTE_GLASS_LAB
+RECT g_autoInkRegion{};
 void SyncAdaptiveInk() {
     static bool timer=false;
     static bool fadeTimer=false;
     static GlassAutoInk::Fade fade;
+    static GlassAutoInk::Decision screenDecision;
+    static double lastScreenSample=0,screenShare=.5;
+    static bool screenActive=false;
     static double lastInkPaint=0;
     const bool motion=ExperienceAbsorbing();
-    const bool active=g_window && g_settings.autoTextColor && !g_highContrast && g_nativeGlass && g_glassActive &&
-        g_backdrop.mode==2 && EffectiveOpacityPercent()<100 && g_isVisible && !IsIconic(g_window) && !ExperienceCompact();
+    const bool active=g_window && g_settings.autoTextColor && !g_highContrast &&
+        EffectiveOpacityPercent()<100 && g_isVisible && !IsIconic(g_window) && !ExperienceCompact();
+    const bool gpuActive=active && g_nativeGlass && g_glassActive && g_backdrop.mode>0;
+    const bool sampleScreen=active && !gpuActive;
     if(active && !motion && !timer){SetTimer(g_window,82,100,nullptr);timer=true;}
     else if((!active || motion) && timer){KillTimer(g_window,82);timer=false;}
     if(motion) {
@@ -660,10 +666,27 @@ void SyncAdaptiveInk() {
         fade.Reset(kNoteText);return; // Freeze ink through the cached-surface animation.
     }
     const int alpha=std::max(g_settings.passThrough?0:1,MulDiv(EffectiveOpacityPercent(),255,100));
-    const int choice=g_backdrop.UpdateAutoInk(active,kBackground,alpha,kText==GlassAutoInk::Light);
+    int choice=g_backdrop.UpdateAutoInk(gpuActive,kBackground,alpha,kText==GlassAutoInk::Light);
+    const double now=GlassClockMs();
+    if(sampleScreen!=screenActive) {
+        screenActive=sampleScreen;screenDecision.Reset(kText==GlassAutoInk::Light);lastScreenSample=0;
+    }
+    if(sampleScreen) {
+        if(now-lastScreenSample>=200) {
+            lastScreenSample=now;
+            RECT rect=g_autoInkRegion,windowRect{};
+            if((rect.right<=rect.left || rect.bottom<=rect.top) && g_edit) {
+                GetWindowRect(g_edit,&rect);
+            } else if(GetWindowRect(g_window,&windowRect)) {
+                OffsetRect(&rect,windowRect.left,windowRect.top);
+            }
+            if(GlassAutoInk::ScreenWhiteShare(rect,screenShare))screenDecision.Update(screenShare,now);
+            else screenDecision.Reset(kText==GlassAutoInk::Light);
+        } else if(screenDecision.valid)screenDecision.Update(screenShare,now);
+        choice=screenDecision.valid?int(screenDecision.white):-1;
+    }
     const COLORREF next=g_highContrast?kText:!g_settings.autoTextColor?g_settings.textColor:
         choice<0?kText:choice?GlassAutoInk::Light:GlassAutoInk::Dark;
-    const double now=GlassClockMs();
     if(active && choice>=0)fade.Aim(next,kNoteText,now);
     else fade.Reset(next); // Explicit colours and accessibility changes apply immediately.
     const bool animating=active && fade.Running(now);
@@ -2654,7 +2677,7 @@ void RenderLayeredWindow() {
     const int radius = std::min({ScaleForDpi(g_window, NoteCornerRadius()), width / 2, height / 2});
 #ifdef FLOATNOTE_GLASS_LAB
     RECT inkBounds{width,height,0,0};
-    const bool collectInk=g_settings.autoTextColor && !g_highContrast && g_backdrop.mode==2 && EffectiveOpacityPercent()<100;
+    const bool collectInk=g_settings.autoTextColor && !g_highContrast && EffectiveOpacityPercent()<100;
 #endif
     for (int y = 0; y < height; ++y) {
         for (int x = 0; x < width; ++x) {
@@ -2737,8 +2760,14 @@ void RenderLayeredWindow() {
     if(collectInk && inkBounds.right>inkBounds.left && inkBounds.bottom>inkBounds.top) {
         const int margin=ScaleForDpi(g_window,3);InflateRect(&inkBounds,margin,margin);
         IntersectRect(&inkBounds,&inkBounds,&editor);
+        // The desktop sample includes our own glyphs. Add surrounding space so
+        // their current colour cannot dominate the next background vote.
+        g_autoInkRegion=inkBounds;
+        const int sampleMargin=ScaleForDpi(g_window,16);
+        InflateRect(&g_autoInkRegion,sampleMargin,sampleMargin);
+        IntersectRect(&g_autoInkRegion,&g_autoInkRegion,&editor);
         g_backdrop.SetInkRegion(inkBounds);
-    } else if(collectInk && GetWindowTextLengthW(g_edit)==0)g_backdrop.SetInkRegion(editor);
+    } else if(collectInk && GetWindowTextLengthW(g_edit)==0){g_autoInkRegion=editor;g_backdrop.SetInkRegion(editor);}
     // A fully selected native EDIT has opaque selection pixels, not a glyph
     // mask. Retain the last text region so selection cannot change the vote.
     SyncAdaptiveInk();
